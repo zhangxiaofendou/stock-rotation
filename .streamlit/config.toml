@@ -1,0 +1,9 @@
+[logger]
+# 抑制 Streamlit 内部日志噪音
+level = "warning"
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
