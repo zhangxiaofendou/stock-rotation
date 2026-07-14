@@ -20,6 +20,8 @@ from data.sources.akshare_source import AkShareSource
 from data.storage.parquet_store import ParquetStore
 from config.sector_map import SW_LEVEL2_MAP, get_sector_name
 from config.logger import get_logger
+from model.state_machine import StateMachine
+from model.transition import TransitionRules
 
 logger = get_logger(__name__)
 
@@ -35,6 +37,79 @@ def get_source():
 @st.cache_resource
 def get_store():
     return ParquetStore()
+
+
+@st.cache_resource
+def get_state_machine():
+    return StateMachine()
+
+
+# ============================================================
+# 状态相关数据加载
+# ============================================================
+_STATE_SNAPSHOT = None
+
+
+def load_all_sector_states():
+    """加载所有板块的九宫格状态（仅加载一次，全局缓存）"""
+    global _STATE_SNAPSHOT
+    if _STATE_SNAPSHOT is not None:
+        return _STATE_SNAPSHOT
+    sm = get_state_machine()
+    try:
+        df = sm.calc_all_sectors_state()
+        if df is not None and not df.empty:
+            _STATE_SNAPSHOT = df
+            return df
+    except Exception as e:
+        logger.warning(f"加载板块状态失败: {e}")
+    return pd.DataFrame()
+
+
+def detect_state_transitions(all_states_df, days_back=5):
+    """检测最近N天内的状态切换
+
+    返回:
+        pd.DataFrame: sector_code, sector_name, from_state, to_state,
+                      transition_date, days_ago
+    """
+    sm = get_state_machine()
+    transitions = []
+
+    if all_states_df is None or all_states_df.empty:
+        return pd.DataFrame()
+
+    for _, row in all_states_df.iterrows():
+        code = row["sector_code"]
+        try:
+            state_series = sm.calc_state_series(code)
+            if state_series is None or state_series.empty or len(state_series) < 2:
+                continue
+
+            # 取最后 days_back+1 天的数据来检测切换
+            recent = state_series.tail(days_back + 2)
+            states = recent["state"].tolist()
+            dates = recent["date"].tolist()
+
+            for i in range(1, len(states)):
+                if states[i] != states[i - 1]:
+                    transitions.append({
+                        "sector_code": code,
+                        "sector_name": row.get("sector_name", code),
+                        "from_state": states[i - 1],
+                        "to_state": states[i],
+                        "state_change": f"{states[i-1]} → {states[i]}",
+                        "date": dates[i],
+                    })
+        except Exception:
+            continue
+
+    if not transitions:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(transitions)
+    df = df.sort_values("date", ascending=False).reset_index(drop=True)
+    return df
 
 
 # ============================================================
@@ -836,6 +911,276 @@ def _render_stock_detail_popup(code: str, name: str):
 
 
 # ============================================================
+# Tab 5: 九宫格状态关联
+# ============================================================
+
+# 九宫格 3×3 布局
+_GRID_LAYOUT = [
+    # row1: 上涨
+    ["①领涨减速", "②稳健上行", "③加速冲顶"],
+    # row2: 横盘
+    ["④强转弱", "⑤中性震荡", "⑥弱转强"],
+    # row3: 下跌
+    ["⑦持续杀跌", "⑧下跌中继", "⑨底背离"],
+]
+
+# 状态颜色映射
+_STATE_COLORS = {
+    "①领涨减速": ("#FFF3E0", "#E65100"),  # 浅橙/深橙 — 警示
+    "②稳健上行": ("#E8F5E9", "#2E7D32"),  # 浅绿/深绿 — 健康
+    "③加速冲顶": ("#FCE4EC", "#C62828"),  # 浅红/深红 — 过热
+    "④强转弱":   ("#FFF8E1", "#F9A825"),  # 浅黄/深黄 — 恶化
+    "⑤中性震荡": ("#ECEFF1", "#546E7A"),  # 浅灰/深灰 — 中性
+    "⑥弱转强":   ("#E3F2FD", "#1565C0"),  # 浅蓝/深蓝 — 转机
+    "⑦持续杀跌": ("#FFEBEE", "#B71C1C"),  # 浅深红/深红 — 危险
+    "⑧下跌中继": ("#F3E5F5", "#6A1B9A"),  # 浅紫/深紫 — 弱势
+    "⑨底背离":   ("#E0F2F1", "#00695C"),  # 浅青/深青 — 机会
+}
+
+# 动作颜色映射
+_ACTION_COLORS = {
+    "加仓": "#2E7D32",
+    "加仓（第二批）": "#388E3C",
+    "分批建仓（第一批）": "#43A047",
+    "持有": "#1565C0",
+    "持有，不追": "#1976D2",
+    "持有，设止盈": "#1E88E5",
+    "减仓": "#F9A825",
+    "减仓→观望": "#FBC02D",
+    "清仓": "#C62828",
+    "止损": "#B71C1C",
+    "观察": "#78909C",
+    "重点关注": "#FF6F00",
+    "维持": "#546E7A",
+}
+
+
+def _render_state_grid(current_state: str):
+    """渲染九宫格状态可视化 — 3×3 网格，高亮当前板块所在格"""
+    st.markdown("#### 🎯 板块所属九宫格状态")
+
+    # 构建 HTML 表格
+    rows_html = ""
+    for row in _GRID_LAYOUT:
+        cells = ""
+        for state in row:
+            bg, text_color = _STATE_COLORS.get(state, ("#ECEFF1", "#546E7A"))
+            if state == current_state:
+                # 高亮当前状态：加粗边框 + 标记
+                cells += (
+                    f'<td style="background:{bg};color:{text_color};padding:16px 12px;'
+                    f'text-align:center;font-size:14px;font-weight:bold;'
+                    f'border:3px solid #FF6F00;border-radius:6px;">'
+                    f'📍 {state}'
+                    f'</td>'
+                )
+            else:
+                cells += (
+                    f'<td style="background:{bg};color:{text_color};padding:12px 10px;'
+                    f'text-align:center;font-size:13px;opacity:0.7;border-radius:4px;">'
+                    f'{state}'
+                    f'</td>'
+                )
+        rows_html += f"<tr>{cells}</tr>"
+
+    table_html = (
+        f'<table style="width:100%;border-collapse:separate;border-spacing:6px;">'
+        f'{rows_html}'
+        f'</table>'
+        f'<div style="margin-top:8px;display:flex;justify-content:space-around;font-size:12px;color:#888;">'
+        f'<span>← 左: RS减弱 | 右: RS增强 →</span>'
+        f'<span>↑ 上: 价格上涨 | 下: 价格下跌 ↓</span>'
+        f'</div>'
+    )
+    st.markdown(table_html, unsafe_allow_html=True)
+
+
+def _render_state_transitions(sector_code: str, sector_name: str):
+    """渲染该板块的状态切换历史"""
+    st.markdown("#### 📜 板块状态切换历史")
+
+    sm = get_state_machine()
+    tr = TransitionRules()
+
+    try:
+        state_series = sm.calc_state_series(sector_code)
+        if state_series is None or state_series.empty:
+            st.info("该板块暂无历史状态数据")
+            return
+    except Exception as e:
+        st.info(f"无法获取状态序列: {e}")
+        return
+
+    # 找出切换点
+    states = state_series["state"].tolist()
+    dates = state_series["date"].tolist()
+
+    transitions = []
+    for i in range(1, len(states)):
+        if states[i] != states[i - 1]:
+            from_s = states[i - 1]
+            to_s = states[i]
+            action, logic = tr.get_transition_action(from_s, to_s)
+            transitions.append({
+                "日期": dates[i].strftime("%Y-%m-%d") if hasattr(dates[i], "strftime") else str(dates[i])[:10],
+                "切换前": from_s,
+                "切换后": to_s,
+                "操作建议": f"{action} — {logic}",
+            })
+
+    # 显示最近切换
+    if transitions:
+        # 最近一次切换高亮卡片
+        latest = transitions[-1]
+        action_color = _ACTION_COLORS.get(latest["操作建议"].split("—")[0].strip(), "#78909C")
+        st.markdown(
+            f'<div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;margin-bottom:12px;">'
+            f'<span style="font-size:12px;color:#888;">最近一次切换 · {latest["日期"]}</span><br>'
+            f'<span style="font-size:18px;font-weight:bold;">{latest["切换前"]} → {latest["切换后"]}</span><br>'
+            f'<span style="font-size:13px;background:{action_color};color:white;padding:2px 8px;border-radius:4px;">'
+            f'{latest["操作建议"]}</span>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        # 最近 10 次切换
+        st.caption(f"最近 10 次状态切换（共 {len(transitions)} 次）")
+        tdf = pd.DataFrame(transitions[-10:][::-1])
+        # 按操作建议着色
+        def color_action(val):
+            action = str(val).split("—")[0].strip()
+            c = _ACTION_COLORS.get(action, "#78909C")
+            return f"color:white;background:{c};padding:2px 6px;border-radius:3px;"
+        styled = tdf.style.applymap(color_action, subset=["操作建议"])
+        st.dataframe(styled, use_container_width=True, hide_index=True)
+    else:
+        st.info("该板块暂无状态切换记录")
+
+    # 当前状态详情
+    st.markdown("---")
+    latest_row = state_series.iloc[-1]
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("当前状态", latest_row.get("state", "N/A"))
+    with col2:
+        st.metric("价格趋势", latest_row.get("trend", "N/A"))
+    with col3:
+        rs_val = latest_row.get("rs_momentum_percentile")
+        st.metric("RS动量分位数", f"{rs_val:.1f}%" if rs_val is not None and not pd.isna(rs_val) else "N/A")
+
+
+def _render_same_state_sectors(current_state: str, current_code: str):
+    """展示处于相同状态的其他板块，以及最近发生状态切换的板块"""
+    all_states = load_all_sector_states()
+    if all_states is None or all_states.empty:
+        st.info("暂无板块状态数据")
+        return
+
+    st.markdown("#### 🌐 其他板块状态总览")
+
+    # 同状态板块
+    same_state = all_states[all_states["state"] == current_state].copy()
+    same_state = same_state[same_state["sector_code"] != current_code]
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        bg, _ = _STATE_COLORS.get(current_state, ("#ECEFF1", "#546E7A"))
+        st.markdown(
+            f'<div style="background:{bg};padding:8px 12px;border-radius:6px;margin-bottom:8px;">'
+            f'<b>同处于「{current_state}」的板块</b> ({len(same_state)} 个)'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+        if not same_state.empty:
+            for _, r in same_state.head(10).iterrows():
+                sc = r.get("sector_code", "")
+                sn = r.get("sector_name", sc)
+                rs = r.get("rs_momentum_percentile", None)
+                rs_str = f" | RS: {rs:.1f}%" if rs is not None and not pd.isna(rs) else ""
+                st.caption(f"• {sn} ({sc}){rs_str}")
+        else:
+            st.caption("仅此板块处于该状态")
+
+    with col2:
+        # 最近发生切换的板块
+        trans_df = detect_state_transitions(all_states, days_back=3)
+        st.markdown("<b>最近3天发生切换的板块</b>", unsafe_allow_html=True)
+        if not trans_df.empty:
+            for _, r in trans_df.head(10).iterrows():
+                sn = r.get("sector_name", "")
+                sc = r.get("sector_code", "")
+                state_chg = r.get("state_change", "")
+                d = str(r.get("date", ""))[:10]
+                st.caption(f"• {sn} — {state_chg} ({d})")
+        else:
+            st.caption("最近3天无板块状态切换")
+
+    # 买入/卖出信号快速扫描
+    st.markdown("---")
+    st.markdown("#### 📡 信号快速扫描")
+
+    buy_states = {"⑨底背离", "⑥弱转强"}
+    sell_states = {"①领涨减速", "④强转弱", "⑦持续杀跌"}
+
+    buy_sectors = all_states[all_states["state"].isin(buy_states)].copy()
+    sell_sectors = all_states[all_states["state"].isin(sell_states)].copy()
+
+    col_a, col_b = st.columns(2)
+    with col_a:
+        st.markdown(
+            f'<span style="color:#2E7D32;font-weight:bold;">🟢 买入信号板块</span> ({len(buy_sectors)} 个)',
+            unsafe_allow_html=True,
+        )
+        if not buy_sectors.empty:
+            for _, r in buy_sectors.iterrows():
+                st.caption(f"• {r.get('sector_name', '')} ({r.get('sector_code', '')}) — {r.get('state', '')}")
+        else:
+            st.caption("暂无买入信号")
+
+    with col_b:
+        st.markdown(
+            f'<span style="color:#C62828;font-weight:bold;">🔴 卖出信号板块</span> ({len(sell_sectors)} 个)',
+            unsafe_allow_html=True,
+        )
+        if not sell_sectors.empty:
+            for _, r in sell_sectors.iterrows():
+                st.caption(f"• {r.get('sector_name', '')} ({r.get('sector_code', '')}) — {r.get('state', '')}")
+        else:
+            st.caption("暂无卖出信号")
+
+
+def _render_state_tab(sector_code: str, sector_name: str):
+    """Tab 5 主入口：九宫格状态关联"""
+    st.subheader(f"🧭 {sector_name} 九宫格状态关联")
+
+    # 获取当前板块状态
+    all_states = load_all_sector_states()
+    current_state = None
+    if all_states is not None and not all_states.empty:
+        match = all_states[all_states["sector_code"] == sector_code]
+        if not match.empty:
+            current_state = match.iloc[0]["state"]
+
+    if current_state is None:
+        st.warning("无法获取该板块当前九宫格状态，请先运行数据更新")
+        return
+
+    # 1. 九宫格可视化
+    _render_state_grid(current_state)
+
+    st.markdown("---")
+
+    # 2. 状态切换历史
+    _render_state_transitions(sector_code, sector_name)
+
+    st.markdown("---")
+
+    # 3. 同状态板块 + 信号扫描
+    _render_same_state_sectors(current_state, sector_code)
+
+
+# ============================================================
 # render() 入口
 # ============================================================
 
@@ -890,8 +1235,8 @@ def render():
     merged_df = build_component_table(component_df, spot_df)
 
     # ---- Tab 导航 ----
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "📋 成分股排名", "🏆 龙头识别", "🎯 双重漏斗选股", "📈 个股详情"
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "📋 成分股排名", "🏆 龙头识别", "🎯 双重漏斗选股", "📈 个股详情", "🧭 九宫格状态"
     ])
 
     with tab1:
@@ -903,22 +1248,5 @@ def render():
     with tab3:
         _render_stock_funnel(merged_df, sector_name)
 
-    with tab4:
-        st.subheader("📈 个股详情查询")
-        if not merged_df.empty and "stock_code" in merged_df.columns and "stock_name" in merged_df.columns:
-            stock_options = {"": "请选择个股"}
-            for _, row in merged_df.iterrows():
-                code = row.get("stock_code", "")
-                name = row.get("stock_name", "")
-                stock_options[code] = f"{name} ({code})"
-
-            selected_stock = st.selectbox(
-                "选择个股",
-                options=list(stock_options.keys()),
-                format_func=lambda x: stock_options[x],
-            )
-            if selected_stock:
-                stock_name = merged_df[merged_df["stock_code"] == selected_stock]["stock_name"].iloc[0]
-                _render_stock_detail_popup(selected_stock, stock_name)
-        else:
-            st.info("暂无个股数据")
+    with tab5:
+        _render_state_tab(selected_sector_code, sector_name)
