@@ -1,0 +1,924 @@
+"""
+个股下钻页面
+============
+PRD 5.2 实现：板块成分股列表（按相对强弱排序）、龙头识别、
+基本面快照（PE/PB/ROE/营收增速）、双重漏斗选股（基本面+资金面）。
+"""
+
+import streamlit as st
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import pandas as pd
+import numpy as np
+import sys
+import os
+from datetime import datetime, timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+
+from data.sources.akshare_source import AkShareSource
+from data.storage.parquet_store import ParquetStore
+from config.sector_map import SW_LEVEL2_MAP, get_sector_name
+from config.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+# ============================================================
+# 缓存资源
+# ============================================================
+@st.cache_resource
+def get_source():
+    return AkShareSource()
+
+
+@st.cache_resource
+def get_store():
+    return ParquetStore()
+
+
+# ============================================================
+# 数据加载（带缓存）
+# ============================================================
+@st.cache_data(ttl=1800)
+def load_spot_all():
+    """加载全市场A股实时快照数据"""
+    source = get_source()
+    try:
+        df = source.ak.stock_zh_a_spot_em()
+        if df is not None and not df.empty:
+            return df
+    except Exception as e:
+        logger.warning(f"加载全市场快照失败: {e}")
+    return None
+
+
+@st.cache_data(ttl=86400)
+def load_component_stocks(sector_code: str):
+    """加载板块成分股列表"""
+    source = get_source()
+    df = source.get_index_component(sector_code)
+    if df is None or df.empty:
+        return None
+    # 统一列名
+    if "stock_code" not in df.columns:
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if "code" in col_lower or "代码" in str(col):
+                df = df.rename(columns={col: "stock_code"})
+                break
+    if "stock_name" not in df.columns:
+        for col in df.columns:
+            col_lower = str(col).lower()
+            if "name" in col_lower or "名称" in str(col):
+                df = df.rename(columns={col: "stock_name"})
+                break
+    # 清洗代码
+    df["stock_code"] = df["stock_code"].astype(str).str.replace("'", "").str.strip()
+    return df
+
+
+@st.cache_data(ttl=1800)
+def load_stock_fund_flow(stock_code: str):
+    """加载个股资金流"""
+    source = get_source()
+    # 判断市场
+    code = str(stock_code).zfill(6)
+    if code.startswith(("6", "5")):
+        market = "sh"
+    else:
+        market = "sz"
+    try:
+        df = source.get_stock_individual_fund_flow(stock=code, market=market)
+        return df
+    except Exception as e:
+        logger.warning(f"加载个股资金流 {code} 失败: {e}")
+        return None
+
+
+@st.cache_data(ttl=86400)
+def load_stock_hist_cached(stock_code: str, days: int = 30):
+    """加载个股历史行情（优先本地缓存，其次 API）"""
+    store = get_store()
+    code = str(stock_code).zfill(6)
+
+    # 先尝试本地缓存
+    df = store.load_stock_hist(code)
+    if df is not None and not df.empty:
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+        df = df.sort_values("date").reset_index(drop=True)
+        return df.tail(days)
+
+    # 本地没有，从 API 拉取
+    source = get_source()
+    end = datetime.now().strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
+    try:
+        df = source.get_stock_hist(symbol=code, start=start, end=end, adjust="qfq")
+        if df is not None and not df.empty:
+            if "日期" in df.columns:
+                df = df.rename(columns={"日期": "date"})
+            if "date" in df.columns:
+                df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values("date").reset_index(drop=True)
+        return df
+    except Exception as e:
+        logger.warning(f"加载个股历史 {code} 失败: {e}")
+        return None
+
+
+@st.cache_data(ttl=86400)
+def load_financial_summary(stock_code: str):
+    """加载个股财务摘要（ROE、营收增速等）"""
+    source = get_source()
+    code = str(stock_code).zfill(6)
+    try:
+        # 使用东方财富业绩报表接口
+        df = source.ak.stock_yjbb_em(date=(datetime.now() - timedelta(days=365)).strftime("%Y%m%d"))
+        if df is not None and not df.empty:
+            # 筛选该股票
+            mask = df["股票代码"].astype(str).str.zfill(6) == code
+            stock_df = df[mask]
+            if not stock_df.empty:
+                return stock_df.iloc[0].to_dict()
+    except Exception as e:
+        logger.warning(f"加载财务摘要 {code} 失败: {e}")
+    return None
+
+
+# ============================================================
+# 数据处理函数
+# ============================================================
+
+def _determine_market(code: str) -> str:
+    """根据股票代码判断市场"""
+    code = str(code).zfill(6)
+    if code.startswith("6"):
+        return "sh"
+    return "sz"
+
+
+def _format_pe(pe_val) -> str:
+    """格式化PE值"""
+    if pe_val is None or pd.isna(pe_val) or pe_val <= 0:
+        return "N/A"
+    return f"{pe_val:.1f}"
+
+
+def _format_pb(pb_val) -> str:
+    """格式化PB值"""
+    if pb_val is None or pd.isna(pb_val) or pb_val <= 0:
+        return "N/A"
+    return f"{pb_val:.2f}"
+
+
+def _format_pct(val) -> str:
+    """格式化百分比"""
+    if val is None or pd.isna(val):
+        return "N/A"
+    return f"{val:+.2f}%"
+
+
+def _format_money(val) -> str:
+    """格式化金额（亿）"""
+    if val is None or pd.isna(val):
+        return "N/A"
+    yi = val / 1e8
+    if abs(yi) >= 1:
+        return f"{yi:+.2f}亿"
+    return f"{val/1e4:+.0f}万"
+
+
+def build_component_table(component_df: pd.DataFrame, spot_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    合并成分股列表和实时快照，构建完整成分股表格。
+    返回按涨跌幅排序的 DataFrame。
+    """
+    if component_df is None or component_df.empty:
+        return pd.DataFrame()
+
+    if spot_df is None or spot_df.empty:
+        # 没有快照数据，只返回成分股列表
+        result = component_df[["stock_code", "stock_name"]].copy()
+        result["涨跌幅"] = None
+        return result
+
+    # 统一代码格式
+    spot_codes = spot_df["代码"].astype(str).str.zfill(6)
+    component_codes = component_df["stock_code"].astype(str).str.zfill(6)
+
+    # 筛选属于本板块的股票
+    spot_in_sector = spot_df[spot_codes.isin(component_codes)].copy()
+
+    if spot_in_sector.empty:
+        return component_df[["stock_code", "stock_name"]].copy()
+
+    # 提取关键列
+    col_map = {
+        "代码": "stock_code",
+        "名称": "stock_name",
+        "最新价": "latest_price",
+        "涨跌幅": "change_pct",
+        "涨跌额": "change_amount",
+        "成交量": "volume",
+        "成交额": "amount",
+        "振幅": "amplitude",
+        "换手率": "turnover",
+        "量比": "volume_ratio",
+        "市盈率-动态": "pe",
+        "市净率": "pb",
+        "总市值": "total_mv",
+        "流通市值": "float_mv",
+    }
+
+    result_cols = {}
+    for src, dst in col_map.items():
+        if src in spot_in_sector.columns:
+            result_cols[dst] = spot_in_sector[src]
+
+    result = pd.DataFrame(result_cols)
+    result["stock_code"] = result["stock_code"].astype(str).str.zfill(6)
+
+    # 按涨跌幅排序
+    if "change_pct" in result.columns:
+        result = result.sort_values("change_pct", ascending=False, na_position="last").reset_index(drop=True)
+
+    return result
+
+
+def calculate_fundamental_score(row: dict) -> float:
+    """
+    计算基本面得分（0-100分）
+    维度：PE合理、PB合理、ROE高、营收增速高
+    """
+    score = 50.0  # 基础分
+
+    pe = row.get("pe")
+    pb = row.get("pb")
+
+    # PE：10-40 为合理区间，越低越好
+    if pe is not None and not pd.isna(pe) and pe > 0:
+        if pe <= 15:
+            score += 15
+        elif pe <= 25:
+            score += 10
+        elif pe <= 40:
+            score += 5
+        elif pe <= 60:
+            score += 0
+        else:
+            score -= 5
+
+    # PB：0.5-5 为合理区间
+    if pb is not None and not pd.isna(pb) and pb > 0:
+        if pb <= 1.5:
+            score += 15
+        elif pb <= 3:
+            score += 10
+        elif pb <= 5:
+            score += 5
+        else:
+            score -= 5
+
+    return max(0, min(100, score))
+
+
+def calculate_capital_score(row: dict, rank_cols: list) -> float:
+    """
+    计算资金面得分（0-100分）
+    维度：近5日主力净流入、20日动量排名、换手率适中度
+    """
+    score = 50.0
+
+    # 涨跌幅（日涨幅作为动量参考）
+    change_pct = row.get("change_pct")
+    if change_pct is not None and not pd.isna(change_pct):
+        if change_pct > 5:
+            score += 20
+        elif change_pct > 2:
+            score += 12
+        elif change_pct > 0:
+            score += 5
+        elif change_pct > -2:
+            score -= 5
+        else:
+            score -= 10
+
+    # 换手率适中度
+    turnover = row.get("turnover")
+    if turnover is not None and not pd.isna(turnover):
+        if 3 <= turnover <= 10:
+            score += 15  # 活跃但不过热
+        elif 1 <= turnover < 3:
+            score += 8
+        elif turnover > 20:
+            score -= 5  # 过热
+
+    return max(0, min(100, score))
+
+
+# ============================================================
+# 渲染函数
+# ============================================================
+
+def _render_component_list(merged_df: pd.DataFrame, sector_name: str):
+    """渲染成分股排名列表"""
+    if merged_df.empty:
+        st.warning("暂无该板块成分股数据")
+        return
+
+    st.subheader(f"📋 {sector_name} 成分股排名 ({len(merged_df)}只)")
+
+    # 构建展示表
+    display_cols = []
+    col_config = {}
+
+    if "stock_code" in merged_df.columns:
+        display_cols.append("stock_code")
+        col_config["stock_code"] = st.column_config.TextColumn("代码", width="small")
+
+    if "stock_name" in merged_df.columns:
+        display_cols.append("stock_name")
+        col_config["stock_name"] = st.column_config.TextColumn("名称", width="medium")
+
+    if "latest_price" in merged_df.columns:
+        display_cols.append("latest_price")
+        col_config["latest_price"] = st.column_config.NumberColumn("最新价", format="%.2f")
+
+    if "change_pct" in merged_df.columns:
+        # 创建涨跌幅色阶列
+        display_cols.append("change_pct")
+        col_config["change_pct"] = st.column_config.NumberColumn(
+            "涨跌幅(%)", format="%+.2f",
+        )
+
+    if "turnover" in merged_df.columns:
+        display_cols.append("turnover")
+        col_config["turnover"] = st.column_config.NumberColumn("换手率(%)", format="%.2f")
+
+    if "pe" in merged_df.columns:
+        display_cols.append("pe")
+        col_config["pe"] = st.column_config.NumberColumn("市盈率", format="%.1f")
+
+    if "pb" in merged_df.columns:
+        display_cols.append("pb")
+        col_config["pb"] = st.column_config.NumberColumn("市净率", format="%.2f")
+
+    if "total_mv" in merged_df.columns:
+        display_cols.append("total_mv")
+        col_config["total_mv"] = st.column_config.NumberColumn("总市值(亿)", format="%.0f")
+
+    if "amount" in merged_df.columns:
+        display_cols.append("amount")
+        col_config["amount"] = st.column_config.NumberColumn("成交额(亿)", format="%.1f")
+
+    # 显示数据表
+    display_df = merged_df[display_cols].copy()
+
+    # 高亮涨跌幅
+    def highlight_change(val):
+        if pd.isna(val):
+            return ""
+        color = "#F44336" if val > 0 else ("#4CAF50" if val < 0 else "")
+        return f"color: {color}" if color else ""
+
+    styled = display_df.style.applymap(highlight_change, subset=["change_pct"] if "change_pct" in display_df.columns else [])
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+
+    # 板块统计卡片
+    if len(merged_df) > 0:
+        st.markdown("---")
+        col1, col2, col3, col4 = st.columns(4)
+
+        with col1:
+            up_count = len(merged_df[merged_df.get("change_pct", pd.Series([0]*len(merged_df))) > 0]) if "change_pct" in merged_df.columns else 0
+            down_count = len(merged_df[merged_df.get("change_pct", pd.Series([0]*len(merged_df))) < 0]) if "change_pct" in merged_df.columns else 0
+            st.metric("上涨家数", up_count)
+        with col2:
+            st.metric("下跌家数", down_count)
+        with col3:
+            if "change_pct" in merged_df.columns:
+                avg_change = merged_df["change_pct"].mean()
+                st.metric("平均涨跌幅", f"{avg_change:+.2f}%")
+        with col4:
+            if "pe" in merged_df.columns:
+                valid_pe = merged_df["pe"][merged_df["pe"] > 0]
+                if not valid_pe.empty:
+                    st.metric("PE中位数", f"{valid_pe.median():.1f}")
+
+
+def _render_leaders(merged_df: pd.DataFrame, sector_name: str):
+    """渲染龙头识别"""
+    if merged_df.empty or "change_pct" not in merged_df.columns:
+        st.warning("暂无龙头识别数据")
+        return
+
+    st.subheader(f"🏆 {sector_name} 龙头识别")
+
+    # 按涨跌幅取 Top 5
+    top5 = merged_df.head(5).copy()
+
+    # 龙头股卡片行
+    cols = st.columns(min(len(top5), 5))
+    for i, (_, row) in enumerate(top5.iterrows()):
+        with cols[i]:
+            name = row.get("stock_name", "N/A")
+            code = row.get("stock_code", "")
+            change = row.get("change_pct", 0)
+            price = row.get("latest_price", 0)
+            pe = row.get("pe", None)
+            turnover = row.get("turnover", None)
+
+            change_color = "#F44336" if change > 0 else "#4CAF50"
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e0e0e0;border-radius:8px;padding:12px;text-align:center;">
+                    <div style="font-size:14px;font-weight:bold;margin-bottom:4px;">{name}</div>
+                    <div style="font-size:11px;color:#888;margin-bottom:8px;">{code}</div>
+                    <div style="font-size:20px;font-weight:bold;color:{change_color};">{change:+.2f}%</div>
+                    <div style="font-size:12px;color:#888;">¥{price:.2f}</div>
+                    <div style="font-size:11px;margin-top:4px;">
+                        PE: {_format_pe(pe)} | 换手: {_format_pct(turnover)}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    # 龙头股K线小图
+    st.markdown("---")
+    st.markdown("#### 龙头股近30日走势")
+
+    kline_cols = st.columns(min(len(top5), 3))
+    for i, (_, row) in enumerate(top5.head(3).iterrows()):
+        code = row.get("stock_code", "")
+        name = row.get("stock_name", "")
+        with kline_cols[i]:
+            _render_mini_kline(code, name)
+
+
+def _render_mini_kline(stock_code: str, stock_name: str):
+    """渲染个股迷你K线图"""
+    df = load_stock_hist_cached(stock_code, days=30)
+    if df is None or df.empty:
+        st.caption(f"{stock_name}: 暂无行情数据")
+        return
+
+    # 标准化列名
+    col_map = {}
+    for col in df.columns:
+        if col in ["开盘", "open"]:
+            col_map[col] = "open"
+        elif col in ["收盘", "close"]:
+            col_map[col] = "close"
+        elif col in ["最高", "high"]:
+            col_map[col] = "high"
+        elif col in ["最低", "low"]:
+            col_map[col] = "low"
+        elif col in ["成交量", "volume"]:
+            col_map[col] = "volume"
+    if col_map:
+        df = df.rename(columns=col_map)
+
+    required_cols = ["open", "high", "low", "close"]
+    if not all(c in df.columns for c in required_cols):
+        st.caption(f"{stock_name}: 数据不完整")
+        return
+
+    # 计算均线
+    df["MA5"] = df["close"].rolling(5).mean()
+    df["MA20"] = df["close"].rolling(20).mean()
+
+    fig = make_subplots(
+        rows=2, cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.02,
+        row_heights=[0.75, 0.25],
+    )
+
+    fig.add_trace(
+        go.Candlestick(
+            x=df["date"],
+            open=df["open"],
+            high=df["high"],
+            low=df["low"],
+            close=df["close"],
+            name="",
+            increasing_line_color="#F44336",
+            decreasing_line_color="#4CAF50",
+            showlegend=False,
+        ),
+        row=1, col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(x=df["date"], y=df["MA5"], mode="lines",
+                    line={"color": "#FF9800", "width": 0.8}, name="MA5", showlegend=False),
+        row=1, col=1,
+    )
+    fig.add_trace(
+        go.Scatter(x=df["date"], y=df["MA20"], mode="lines",
+                    line={"color": "#2196F3", "width": 0.8}, name="MA20", showlegend=False),
+        row=1, col=1,
+    )
+
+    if "volume" in df.columns:
+        colors = ["#F44336" if df["close"].iloc[i] >= df["close"].iloc[i-1] else "#4CAF50"
+                   for i in range(len(df))]
+        fig.add_trace(
+            go.Bar(x=df["date"], y=df["volume"], marker_color=colors,
+                    opacity=0.4, showlegend=False),
+            row=2, col=1,
+        )
+
+    fig.update_layout(
+        title=f"{stock_name} ({stock_code})",
+        title_font_size=12,
+        height=250,
+        margin={"l": 5, "r": 5, "t": 30, "b": 5},
+        xaxis_rangeslider_visible=False,
+    )
+    fig.update_xaxes(showticklabels=False, row=1, col=1)
+    fig.update_yaxes(title_text="", row=1, col=1)
+    fig.update_yaxes(title_text="", row=2, col=1)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+
+def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str):
+    """渲染双重漏斗选股"""
+    if merged_df.empty:
+        st.warning("暂无选股数据")
+        return
+
+    st.subheader(f"🎯 双重漏斗选股")
+
+    # 计算基本面得分
+    if "pe" in merged_df.columns and "pb" in merged_df.columns:
+        merged_df["fundamental_score"] = merged_df.apply(calculate_fundamental_score, axis=1)
+    else:
+        merged_df["fundamental_score"] = 50.0
+
+    if "change_pct" in merged_df.columns and "turnover" in merged_df.columns:
+        merged_df["capital_score"] = merged_df.apply(calculate_capital_score, axis=1)
+    else:
+        merged_df["capital_score"] = 50.0
+
+    # 综合得分
+    merged_df["total_score"] = merged_df["fundamental_score"] * 0.4 + merged_df["capital_score"] * 0.6
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("#### 🔍 基本面漏斗")
+        st.caption("按估值合理性（PE/PB）筛选")
+        pe_max = st.slider("PE上限", 0, 200, 80, 5, key="pe_filter")
+        pb_max = st.slider("PB上限", 0.0, 20.0, 10.0, 0.5, key="pb_filter")
+
+        fundamental_filtered = merged_df.copy()
+        if "pe" in fundamental_filtered.columns:
+            fundamental_filtered = fundamental_filtered[
+                (fundamental_filtered["pe"] > 0) & (fundamental_filtered["pe"] <= pe_max)
+            ]
+        if "pb" in fundamental_filtered.columns:
+            fundamental_filtered = fundamental_filtered[
+                (fundamental_filtered["pb"] > 0) & (fundamental_filtered["pb"] <= pb_max)
+            ]
+
+        fundamental_filtered = fundamental_filtered.sort_values(
+            "fundamental_score", ascending=False
+        )
+
+        st.metric("通过基本面筛选", f"{len(fundamental_filtered)}只 / {len(merged_df)}只")
+
+        if not fundamental_filtered.empty:
+            show_cols = ["stock_code", "stock_name", "pe", "pb", "fundamental_score"]
+            show_cols = [c for c in show_cols if c in fundamental_filtered.columns]
+            st.dataframe(
+                fundamental_filtered[show_cols].head(10),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    with col2:
+        st.markdown("#### 💰 资金面漏斗")
+        st.caption("按资金流向、动量、活跃度筛选")
+        change_min = st.slider("最低涨幅(%)", -10.0, 10.0, -3.0, 0.5, key="change_filter")
+        turnover_min = st.slider("最低换手率(%)", 0.0, 30.0, 0.5, 0.5, key="turnover_filter")
+
+        capital_filtered = merged_df.copy()
+        if "change_pct" in capital_filtered.columns:
+            capital_filtered = capital_filtered[capital_filtered["change_pct"] >= change_min]
+        if "turnover" in capital_filtered.columns:
+            capital_filtered = capital_filtered[capital_filtered["turnover"] >= turnover_min]
+
+        capital_filtered = capital_filtered.sort_values("capital_score", ascending=False)
+
+        st.metric("通过资金面筛选", f"{len(capital_filtered)}只 / {len(merged_df)}只")
+
+        if not capital_filtered.empty:
+            show_cols = ["stock_code", "stock_name", "change_pct", "turnover", "capital_score"]
+            show_cols = [c for c in show_cols if c in capital_filtered.columns]
+            st.dataframe(
+                capital_filtered[show_cols].head(10),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    # 综合精选：双重漏斗交集
+    st.markdown("---")
+    st.markdown("#### ⭐ 综合精选（双重漏斗交集 Top 5）")
+
+    if not fundamental_filtered.empty and not capital_filtered.empty:
+        # 取两个过滤结果的交集
+        fundamental_codes = set(fundamental_filtered["stock_code"])
+        capital_codes = set(capital_filtered["stock_code"])
+        intersection_codes = fundamental_codes & capital_codes
+
+        intersection = merged_df[merged_df["stock_code"].isin(intersection_codes)]
+        intersection = intersection.sort_values("total_score", ascending=False).head(5)
+
+        if not intersection.empty:
+            show_cols = ["stock_code", "stock_name", "pe", "pb", "change_pct",
+                         "turnover", "fundamental_score", "capital_score", "total_score"]
+            show_cols = [c for c in show_cols if c in intersection.columns]
+
+            def highlight_score(val, score_type=""):
+                if pd.isna(val):
+                    return ""
+                if isinstance(val, (int, float)):
+                    if val >= 70:
+                        return "background-color: #C8E6C9; color: #2E7D32"
+                    elif val >= 50:
+                        return "background-color: #FFF9C4; color: #F57F17"
+                return ""
+
+            styled = intersection[show_cols].style.applymap(
+                highlight_score, subset=[c for c in ["total_score", "fundamental_score", "capital_score"] if c in show_cols]
+            )
+            st.dataframe(styled, use_container_width=True, hide_index=True)
+        else:
+            st.info("当前筛选条件下无交集，请放宽筛选条件")
+    else:
+        st.info("请调整筛选条件，确保两边漏斗均有结果后查看交集")
+
+
+def _render_fund_flow_detail(merged_df: pd.DataFrame):
+    """渲染资金流详情（可展开查看 Top 10 个股资金流）"""
+    if merged_df.empty:
+        return
+
+    st.markdown("---")
+    with st.expander("📊 查看 Top 10 个股资金流详情"):
+        top10 = merged_df.head(10).copy()
+
+        fund_data = []
+        for _, row in top10.iterrows():
+            code = row.get("stock_code", "")
+            name = row.get("stock_name", "")
+
+            ff_df = load_stock_fund_flow(code)
+            if ff_df is not None and not ff_df.empty:
+                # 取最近一天
+                row_data = {
+                    "stock_code": code,
+                    "stock_name": name,
+                }
+                # 尝试提取资金流关键列
+                for col in ff_df.columns:
+                    col_str = str(col)
+                    if "主力" in col_str and "净流入" in col_str:
+                        row_data["主力净流入"] = ff_df[col].iloc[-1] if len(ff_df) > 0 else None
+                    elif "超大单" in col_str and "净流入" in col_str:
+                        row_data["超大单净流入"] = ff_df[col].iloc[-1] if len(ff_df) > 0 else None
+                    elif "大单" in col_str and "净流入" in col_str:
+                        row_data["大单净流入"] = ff_df[col].iloc[-1] if len(ff_df) > 0 else None
+                fund_data.append(row_data)
+
+        if fund_data:
+            fund_df = pd.DataFrame(fund_data)
+            st.dataframe(fund_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("暂无资金流数据")
+
+
+def _render_stock_detail_popup(code: str, name: str):
+    """个股详情弹窗：日K + 资金流 + 基本面"""
+    with st.expander(f"📈 个股详情: {name} ({code})", expanded=False):
+        tab1, tab2, tab3 = st.tabs(["走势图", "资金流", "基本面"])
+
+        with tab1:
+            # 完整K线图
+            df = load_stock_hist_cached(code, days=90)
+            if df is not None and not df.empty:
+                col_map = {}
+                for col in df.columns:
+                    if col in ["开盘", "open"]:
+                        col_map[col] = "open"
+                    elif col in ["收盘", "close"]:
+                        col_map[col] = "close"
+                    elif col in ["最高", "high"]:
+                        col_map[col] = "high"
+                    elif col in ["最低", "low"]:
+                        col_map[col] = "low"
+                    elif col in ["成交量", "volume"]:
+                        col_map[col] = "volume"
+                if col_map:
+                    df = df.rename(columns=col_map)
+
+                required = ["open", "high", "low", "close"]
+                if all(c in df.columns for c in required):
+                    df["MA5"] = df["close"].rolling(5).mean()
+                    df["MA10"] = df["close"].rolling(10).mean()
+                    df["MA20"] = df["close"].rolling(20).mean()
+
+                    fig = make_subplots(
+                        rows=2, cols=1, shared_xaxes=True,
+                        vertical_spacing=0.03, row_heights=[0.7, 0.3],
+                    )
+                    fig.add_trace(
+                        go.Candlestick(
+                            x=df["date"], open=df["open"], high=df["high"],
+                            low=df["low"], close=df["close"], name="",
+                            increasing_line_color="#F44336",
+                            decreasing_line_color="#4CAF50",
+                        ), row=1, col=1,
+                    )
+                    fig.add_trace(
+                        go.Scatter(x=df["date"], y=df["MA5"], mode="lines",
+                                    line={"color": "#FF9800", "width": 1}, name="MA5"),
+                        row=1, col=1,
+                    )
+                    fig.add_trace(
+                        go.Scatter(x=df["date"], y=df["MA10"], mode="lines",
+                                    line={"color": "#E91E63", "width": 1}, name="MA10"),
+                        row=1, col=1,
+                    )
+                    fig.add_trace(
+                        go.Scatter(x=df["date"], y=df["MA20"], mode="lines",
+                                    line={"color": "#2196F3", "width": 1}, name="MA20"),
+                        row=1, col=1,
+                    )
+
+                    if "volume" in df.columns:
+                        colors = ["#F44336" if df["close"].iloc[i] >= df["close"].iloc[max(0, i-1)]
+                                   else "#4CAF50" for i in range(len(df))]
+                        fig.add_trace(
+                            go.Bar(x=df["date"], y=df["volume"],
+                                    marker_color=colors, opacity=0.4, name="成交量"),
+                            row=2, col=1,
+                        )
+
+                    fig.update_layout(
+                        height=400, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+                        xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.1),
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("暂无行情数据")
+
+        with tab2:
+            ff_df = load_stock_fund_flow(code)
+            if ff_df is not None and not ff_df.empty:
+                # 最近30个交易日资金流趋势
+                if len(ff_df) > 0:
+                    for col in ff_df.columns:
+                        col_str = str(col)
+                        if "日期" in col_str or "date" in col_str.lower():
+                            ff_df = ff_df.rename(columns={col: "date"})
+                            break
+                    if "date" in ff_df.columns:
+                        ff_df["date"] = pd.to_datetime(ff_df["date"])
+                        ff_df = ff_df.sort_values("date").tail(30)
+
+                    # 画主力净流入趋势
+                    main_col = None
+                    for col in ff_df.columns:
+                        col_str = str(col)
+                        if "主力" in col_str and "净流入" in col_str:
+                            main_col = col
+                            break
+                    if main_col and "date" in ff_df.columns:
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(
+                            x=ff_df["date"], y=ff_df[main_col],
+                            marker_color=["#F44336" if v >= 0 else "#4CAF50" for v in ff_df[main_col]],
+                            name="主力净流入",
+                        ))
+                        fig.update_layout(
+                            height=300, margin={"l": 10, "r": 10, "t": 30, "b": 10},
+                            title="近30日主力资金净流入",
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    st.dataframe(ff_df.tail(30), use_container_width=True, hide_index=True)
+            else:
+                st.info("暂无资金流数据")
+
+        with tab3:
+            fin = load_financial_summary(code)
+            if fin:
+                st.markdown("#### 财务摘要")
+                col1, col2 = st.columns(2)
+                with col1:
+                    for key in ["股票简称", "营业收入-同比增长", "净利润-同比增长",
+                                "基本每股收益", "净资产收益率"]:
+                        if key in fin and fin[key] is not None:
+                            st.metric(key, f"{fin[key]}")
+                with col2:
+                    for key in ["营业收入-营业收入", "净利润-净利润",
+                                "每股净资产", "总资产报酬率"]:
+                        if key in fin and fin[key] is not None:
+                            st.metric(key, f"{fin[key]}")
+            else:
+                st.info("暂无财务数据")
+
+
+# ============================================================
+# render() 入口
+# ============================================================
+
+_LOADED_COMPONENT_STOCKS = {}
+_LOADED_SPOT = None
+
+
+def render():
+    """个股下钻页面入口"""
+    st.title("🔍 个股下钻")
+    st.caption("选择板块，深入分析成分股。基本面+资金面双重漏斗选股")
+
+    # 板块选择
+    source = get_source()
+
+    # 构建板块代码 -> 名称映射
+    sector_options = {"": "请选择板块"}
+    for code, name in SW_LEVEL2_MAP.items():
+        sector_options[code] = f"{name} ({code})"
+
+    selected_sector_code = st.selectbox(
+        "选择板块",
+        options=list(sector_options.keys()),
+        format_func=lambda x: sector_options[x],
+    )
+
+    if not selected_sector_code:
+        st.info("👈 请先选择一个板块")
+        return
+
+    sector_name = sector_options[selected_sector_code]
+
+    # 加载成分股
+    with st.spinner(f"正在加载 {sector_name} 成分股数据..."):
+        global _LOADED_COMPONENT_STOCKS, _LOADED_SPOT
+
+        if selected_sector_code not in _LOADED_COMPONENT_STOCKS:
+            component_df = load_component_stocks(selected_sector_code)
+            _LOADED_COMPONENT_STOCKS[selected_sector_code] = component_df
+        else:
+            component_df = _LOADED_COMPONENT_STOCKS[selected_sector_code]
+
+        if _LOADED_SPOT is None:
+            _LOADED_SPOT = load_spot_all()
+        spot_df = _LOADED_SPOT
+
+    if component_df is None or component_df.empty:
+        st.error(f"无法获取「{sector_name}」的成分股数据")
+        return
+
+    # 合并数据
+    merged_df = build_component_table(component_df, spot_df)
+
+    # ---- Tab 导航 ----
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "📋 成分股排名", "🏆 龙头识别", "🎯 双重漏斗选股", "📈 个股详情"
+    ])
+
+    with tab1:
+        _render_component_list(merged_df, sector_name)
+
+    with tab2:
+        _render_leaders(merged_df, sector_name)
+
+    with tab3:
+        _render_stock_funnel(merged_df, sector_name)
+
+    with tab4:
+        st.subheader("📈 个股详情查询")
+        if not merged_df.empty and "stock_code" in merged_df.columns and "stock_name" in merged_df.columns:
+            stock_options = {"": "请选择个股"}
+            for _, row in merged_df.iterrows():
+                code = row.get("stock_code", "")
+                name = row.get("stock_name", "")
+                stock_options[code] = f"{name} ({code})"
+
+            selected_stock = st.selectbox(
+                "选择个股",
+                options=list(stock_options.keys()),
+                format_func=lambda x: stock_options[x],
+            )
+            if selected_stock:
+                stock_name = merged_df[merged_df["stock_code"] == selected_stock]["stock_name"].iloc[0]
+                _render_stock_detail_popup(selected_stock, stock_name)
+        else:
+            st.info("暂无个股数据")
