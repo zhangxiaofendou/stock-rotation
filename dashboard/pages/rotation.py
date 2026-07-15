@@ -21,6 +21,12 @@ from model.scoring import SectorScoring
 from model.mirror_pair import MirrorPair
 from config.sector_map import get_sector_name
 from dashboard.components.state_card import render_state_card, STATE_COLORS, STATE_EMOJI
+from dashboard.components.drill_pickers import (
+    load_all_sector_states as _load_drill_states,
+    render_state_picker,
+    render_transition_picker,
+    render_sector_picker,
+)
 
 # 状态颜色映射
 STATE_BG_COLORS = {
@@ -52,28 +58,28 @@ def get_models():
     return sm, scoring, mirror
 
 
-@st.cache_data(ttl=3600)  # 每日盘后更新一次，1小时TTL足够
+@st.cache_data(ttl=86400)  # 每日凌晨更新一次，24h TTL
 def load_state_df():
     """加载板块状态（独立缓存）"""
     sm, _, _ = get_models()
     return sm.calc_all_sectors_state()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_score_df():
     """加载板块评分排行（独立缓存）"""
     _, scoring, _ = get_models()
     return scoring.calc_all_scores()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_mirror_pairs():
     """加载镜像对（独立缓存）"""
     _, _, mirror = get_models()
     return mirror.find_mirror_pairs()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_sector_rs_history(sector_code: str):
     """加载单个板块的RS历史（用于sparkline）"""
     sm, _, _ = get_models()
@@ -334,69 +340,94 @@ def render():
     # ================================================================
     with tab3:
         st.subheader("板块详情卡片")
+        st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 详情卡片")
 
-        if state_df is not None and not state_df.empty:
-            # 选择板块
-            sector_options = {}
-            for _, row in state_df.iterrows():
-                sector_options[f"{row['sector_name']} ({row['sector_code']})"] = row["sector_code"]
+        # 加载 drill 状态数据
+        drill_states = _load_drill_states()
 
-            selected_label = st.selectbox(
-                "选择板块查看详情",
-                list(sector_options.keys()),
+        if drill_states is None or drill_states.empty:
+            st.warning("暂无板块数据")
+            return
+
+        # --- 第 1 级：选择筛选维度 ---
+        filter_mode = st.radio(
+            "筛选维度",
+            ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
+            horizontal=True,
+            key="rotation_tab3_filter",
+        )
+
+        # --- 第 2 级：按状态/切换筛选 → 选行业 ---
+        if filter_mode.startswith("🎯"):
+            _, matching_df = render_state_picker(drill_states)
+        else:
+            _, matching_df = render_transition_picker(drill_states)
+
+        if matching_df is None or matching_df.empty:
+            st.info("👆 请先选择筛选条件")
+            return
+
+        st.markdown("---")
+        selected_code, sector_label = render_sector_picker(
+            matching_df, label="选择行业查看详情", key="rotation_tab3_sector"
+        )
+
+        if not selected_code:
+            return
+
+        # --- 第 3 级：展示板块卡片 ---
+        sector_info = state_df[state_df["sector_code"] == selected_code]
+        if sector_info.empty:
+            st.warning(f"未找到板块 {selected_code} 的数据")
+            return
+        sector_info = sector_info.iloc[0]
+
+        # 获取评分
+        sector_score = None
+        if score_df is not None:
+            score_row = score_df[score_df["sector_code"] == selected_code]
+            if not score_row.empty:
+                sector_score = score_row.iloc[0]["score"]
+
+        # 获取镜像对信息
+        mirror_info = None
+        for mp in mirror_pairs:
+            if mp.get("strong_sector") == selected_code:
+                mirror_info = {
+                    "name": mp.get("weak_name", get_sector_name(mp.get("weak_sector", ""))),
+                    "state": mp.get("weak_state", ""),
+                    "pair_type": mp.get("pair_type", ""),
+                }
+                break
+            elif mp.get("weak_sector") == selected_code:
+                mirror_info = {
+                    "name": mp.get("strong_name", get_sector_name(mp.get("strong_sector", ""))),
+                    "state": mp.get("strong_state", ""),
+                    "pair_type": mp.get("pair_type", ""),
+                }
+                break
+
+        # 获取RS历史（用于sparkline，缓存加速）
+        rs_history = load_sector_rs_history(selected_code)
+
+        render_state_card(
+            sector_code=selected_code,
+            sector_name=sector_info["sector_name"],
+            state=sector_info["state"],
+            score=sector_score,
+            trend=sector_info["trend"],
+            rs_percentile=sector_info.get("rs_percentile"),
+            rs_momentum_percentile=sector_info["rs_momentum_percentile"],
+            mirror_info=mirror_info,
+            rs_history=rs_history,
+        )
+
+        # 镜像对提示
+        if mirror_info:
+            st.info(
+                f"**镜像对验证**: {mirror_info.get('pair_type', '')} - "
+                f"镜像板块: {mirror_info.get('name', 'N/A')} ({mirror_info.get('state', '')})"
             )
-            selected_code = sector_options[selected_label]
-
-            if selected_code:
-                # 获取该板块的详细信息
-                sector_info = state_df[state_df["sector_code"] == selected_code].iloc[0]
-
-                # 获取评分
-                sector_score = None
-                if score_df is not None:
-                    score_row = score_df[score_df["sector_code"] == selected_code]
-                    if not score_row.empty:
-                        sector_score = score_row.iloc[0]["score"]
-
-                # 获取镜像对信息
-                mirror_info = None
-                for mp in mirror_pairs:
-                    if mp.get("strong_sector") == selected_code:
-                        mirror_info = {
-                            "name": mp.get("weak_name", get_sector_name(mp.get("weak_sector", ""))),
-                            "state": mp.get("weak_state", ""),
-                            "pair_type": mp.get("pair_type", ""),
-                        }
-                        break
-                    elif mp.get("weak_sector") == selected_code:
-                        mirror_info = {
-                            "name": mp.get("strong_name", get_sector_name(mp.get("strong_sector", ""))),
-                            "state": mp.get("strong_state", ""),
-                            "pair_type": mp.get("pair_type", ""),
-                        }
-                        break
-
-                # 获取RS历史（用于sparkline，缓存加速）
-                rs_history = load_sector_rs_history(selected_code)
-
-                render_state_card(
-                    sector_code=selected_code,
-                    sector_name=sector_info["sector_name"],
-                    state=sector_info["state"],
-                    score=sector_score,
-                    trend=sector_info["trend"],
-                    rs_percentile=sector_info.get("rs_percentile"),
-                    rs_momentum_percentile=sector_info["rs_momentum_percentile"],
-                    mirror_info=mirror_info,
-                    rs_history=rs_history,
-                )
-
-                # 镜像对提示
-                if mirror_info:
-                    st.info(
-                        f"**镜像对验证**: {mirror_info.get('pair_type', '')} - "
-                        f"镜像板块: {mirror_info.get('name', 'N/A')} ({mirror_info.get('state', '')})"
-                    )
 
 
 if __name__ == "__main__":

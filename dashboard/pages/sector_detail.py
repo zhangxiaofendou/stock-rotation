@@ -21,6 +21,13 @@ from model.scoring import SectorScoring
 from model.transition import TransitionRules
 from config.sector_map import get_sector_name
 from dashboard.components.state_card import STATE_COLORS, STATE_EMOJI
+from dashboard.components.drill_pickers import (
+    load_all_sector_states,
+    detect_state_transitions,
+    render_state_picker,
+    render_transition_picker,
+    render_sector_picker,
+)
 
 
 @st.cache_resource
@@ -41,21 +48,14 @@ def get_scoring():
     return SectorScoring(ps, ss, sm)
 
 
-@st.cache_data(ttl=3600)
-def load_all_sectors_state():
-    """加载所有板块状态（独立缓存）"""
-    sm = get_state_machine()
-    return sm.calc_all_sectors_state()
-
-
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_sector_state_series(sector_code: str):
     """加载板块历史状态序列（独立缓存）"""
     sm = get_state_machine()
     return sm.calc_state_series(sector_code)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_sector_kline(sector_code: str):
     """加载板块K线数据"""
     ps, _ = get_stores()
@@ -95,7 +95,7 @@ def load_sector_kline(sector_code: str):
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_sector_rs(sector_code: str):
     """加载板块RS数据"""
     import os
@@ -332,31 +332,47 @@ def _get_suggestion(state: str, prev_state: str) -> str:
 
 
 def render():
-    """渲染板块详情页面"""
+    """渲染板块详情页面 — 三级联动：九宫格状态/切换 → 行业 → 板块详情"""
     st.title("板块详情")
-    st.markdown("查看板块K线、RS走势、状态历史详情")
+    st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 板块详情")
 
-    # 板块选择
-    state_df = load_all_sectors_state()
+    # ================================================================
+    # 第 1 级：选择筛选维度（状态 or 切换）
+    # ================================================================
+    filter_mode = st.radio(
+        "筛选维度",
+        ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
+        horizontal=True,
+    )
 
+    state_df = load_all_sector_states()
     if state_df is None or state_df.empty:
         st.warning("暂无板块数据")
         return
 
-    # 构建选项列表
-    sector_options = {}
-    for _, row in state_df.iterrows():
-        state_emoji = STATE_EMOJI.get(row["state"], "")
-        sector_options[f"{state_emoji} {row['sector_name']} ({row['sector_code']})"] = row["sector_code"]
+    # ================================================================
+    # 第 2 级：按状态/切换筛选 → 选行业
+    # ================================================================
+    if filter_mode.startswith("🎯"):
+        _, matching_df = render_state_picker(state_df)
+    else:
+        _, matching_df = render_transition_picker(state_df)
 
-    selected_label = st.selectbox("选择板块", list(sector_options.keys()))
-    sector_code = sector_options[selected_label]
-    sector_name = get_sector_name(sector_code)
+    if matching_df is None or matching_df.empty:
+        st.info("👆 请先选择筛选条件")
+        return
+
+    st.markdown("---")
+    sector_code, sector_label = render_sector_picker(
+        matching_df, label="选择行业查看详情", key="sector_detail_picker"
+    )
 
     if not sector_code:
         return
 
-    # 加载数据
+    sector_name = get_sector_name(sector_code)
+
+    # 加载详情数据
     with st.spinner(f"加载 {sector_name} 数据..."):
         kline_df = load_sector_kline(sector_code)
         rs_df = load_sector_rs(sector_code)
