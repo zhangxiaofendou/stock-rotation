@@ -139,27 +139,54 @@ class AkShareSource(BaseDataSource):
         获取申万成分股
 
         参数:
-            symbol: 指数代码，如 "801010.SI"
+            symbol: 指数代码，如 "801010.SI" 或 "801010"
 
         返回:
-            DataFrame，包含成分股代码/名称等。失败返回 None
+            DataFrame，包含 stock_code/stock_name 列。失败返回 None
         """
-        logger.info(f"获取申万成分股: {symbol}")
-        try:
-            df = self.ak.index_component_sw(symbol=symbol)
+        # 去掉 .SI / .SWI 等后缀，index_stock_cons 需要纯数字代码
+        clean_symbol = str(symbol).split(".")[0].strip()
+        logger.info(f"获取申万成分股: {symbol} → {clean_symbol}")
+
+        def _try_cons():
+            """优先使用 index_stock_cons（更稳定）"""
+            df = self.ak.index_stock_cons(symbol=clean_symbol)
             if df is not None and not df.empty:
-                # 处理列名异常（可能出现中文或英文列名）
                 col_map = {}
                 for col in df.columns:
-                    col_lower = str(col).lower().strip()
-                    if col_lower in ["stock_code", "stock code", "代码", "股票代码"]:
+                    col_str = str(col).strip()
+                    if col_str in ("品种代码", "stock_code", "代码", "股票代码"):
                         col_map[col] = "stock_code"
-                    elif col_lower in ["stock_name", "stock name", "名称", "股票名称"]:
+                    elif col_str in ("品种名称", "stock_name", "名称", "股票名称"):
                         col_map[col] = "stock_name"
                 if col_map:
                     df = df.rename(columns=col_map)
-                logger.info(f"获取到 {symbol} 成分股 {len(df)} 只")
-            return df
+                logger.info(f"获取到 {clean_symbol} 成分股 {len(df)} 只 (index_stock_cons)")
+                return df
+            return None
+
+        try:
+            # 优先尝试 index_stock_cons
+            df = _try_cons()
+            if df is not None:
+                return df
+
+            # 回退到 index_component_sw（申万官网）
+            logger.info(f"index_stock_cons 无结果，尝试 index_component_sw...")
+            df2 = self.ak.index_component_sw(symbol=symbol)
+            if df2 is not None and not df2.empty:
+                col_map = {}
+                for col in df2.columns:
+                    col_lower = str(col).lower().strip()
+                    if col_lower in ("stock_code", "stock code", "代码", "股票代码"):
+                        col_map[col] = "stock_code"
+                    elif col_lower in ("stock_name", "stock name", "名称", "股票名称"):
+                        col_map[col] = "stock_name"
+                if col_map:
+                    df2 = df2.rename(columns=col_map)
+                logger.info(f"获取到 {symbol} 成分股 {len(df2)} 只 (index_component_sw)")
+                return df2
+            return None
         except Exception as e:
             logger.error(f"获取成分股失败 {symbol}: {e}")
             return None
