@@ -298,13 +298,24 @@ def calculate_fundamental_score(row: dict) -> float:
         else:
             score -= 5
 
+    # 市值加分：中等市值（50-500亿）加分，小市值风险扣分
+    total_mv = row.get("total_mv")
+    if total_mv is not None and not pd.isna(total_mv) and total_mv > 0:
+        mv_yi = total_mv / 1e8
+        if 100 <= mv_yi <= 500:
+            score += 10
+        elif 50 <= mv_yi < 100:
+            score += 5
+        elif mv_yi < 20:
+            score -= 5  # 太小市值风险高
+
     return max(0, min(100, score))
 
 
-def calculate_capital_score(row: dict, rank_cols: list) -> float:
+def calculate_capital_score(row: dict) -> float:
     """
     计算资金面得分（0-100分）
-    维度：近5日主力净流入、20日动量排名、换手率适中度
+    维度：涨跌幅（动量）、换手率（活跃度）、量比（资金关注度）、成交额（流动性）
     """
     score = 50.0
 
@@ -322,15 +333,36 @@ def calculate_capital_score(row: dict, rank_cols: list) -> float:
         else:
             score -= 10
 
-    # 换手率适中度
+    # 换手率适中度：2%-12% 为活跃区间
     turnover = row.get("turnover")
     if turnover is not None and not pd.isna(turnover):
         if 3 <= turnover <= 10:
-            score += 15  # 活跃但不过热
+            score += 12
         elif 1 <= turnover < 3:
-            score += 8
+            score += 6
         elif turnover > 20:
-            score -= 5  # 过热
+            score -= 5
+
+    # 量比：>1 说明今日成交活跃
+    volume_ratio = row.get("volume_ratio")
+    if volume_ratio is not None and not pd.isna(volume_ratio):
+        if volume_ratio >= 2:
+            score += 10
+        elif volume_ratio >= 1.2:
+            score += 5
+        elif volume_ratio < 0.5:
+            score -= 5
+
+    # 成交额：>1亿 说明流动性好
+    amount = row.get("amount")
+    if amount is not None and not pd.isna(amount) and amount > 0:
+        amount_yi = amount / 1e8
+        if amount_yi >= 5:
+            score += 8
+        elif amount_yi >= 1:
+            score += 4
+        elif amount_yi < 0.3:
+            score -= 3
 
     return max(0, min(100, score))
 
@@ -390,18 +422,23 @@ def _render_component_list(merged_df: pd.DataFrame, sector_name: str):
         display_cols.append("amount")
         col_config["amount"] = st.column_config.NumberColumn("成交额(亿)", format="%.1f")
 
-    # 显示数据表
+    # 显示数据表 — 使用 column_config 避免 Styler 导致的乱码
     display_df = merged_df[display_cols].copy()
 
-    # 高亮涨跌幅
-    def highlight_change(val):
-        if pd.isna(val):
-            return ""
-        color = "#F44336" if val > 0 else ("#4CAF50" if val < 0 else "")
-        return f"color: {color}" if color else ""
+    # 对涨跌幅列使用色阶列配置
+    if "change_pct" in display_df.columns:
+        col_config["change_pct"] = st.column_config.NumberColumn(
+            "涨跌幅(%)",
+            format="%+.2f",
+            help="红涨绿跌",
+        )
 
-    styled = display_df.style.applymap(highlight_change, subset=["change_pct"] if "change_pct" in display_df.columns else [])
-    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.dataframe(
+        display_df,
+        column_config=col_config,
+        use_container_width=True,
+        hide_index=True,
+    )
 
     # 板块统计卡片
     if len(merged_df) > 0:
@@ -564,121 +601,170 @@ def _render_mini_kline(stock_code: str, stock_name: str):
 
 
 def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str):
-    """渲染双重漏斗选股"""
+    """双重漏斗选股：资金面 Top N% → 基本面 Top K 只，顺序筛选"""
     if merged_df.empty:
         st.warning("暂无选股数据")
         return
 
-    st.subheader(f"🎯 双重漏斗选股")
+    st.subheader(f"🎯 双重漏斗选股 — {sector_name}")
+    st.caption("顺序筛选：先资金面筛出 Top 30%，再基本面从中精选 Top 5-10 只")
 
-    # 计算基本面得分
+    # ---- 计算各维度得分 ----
     if "pe" in merged_df.columns and "pb" in merged_df.columns:
         merged_df["fundamental_score"] = merged_df.apply(calculate_fundamental_score, axis=1)
     else:
         merged_df["fundamental_score"] = 50.0
 
-    if "change_pct" in merged_df.columns and "turnover" in merged_df.columns:
+    if "change_pct" in merged_df.columns or "turnover" in merged_df.columns:
         merged_df["capital_score"] = merged_df.apply(calculate_capital_score, axis=1)
     else:
         merged_df["capital_score"] = 50.0
 
-    # 综合得分
-    merged_df["total_score"] = merged_df["fundamental_score"] * 0.4 + merged_df["capital_score"] * 0.6
+    total_count = len(merged_df)
 
-    col1, col2 = st.columns(2)
+    # ============================================================
+    # Layer 1: 资金面 — 全板块排序，取 Top N%
+    # ============================================================
+    st.markdown("---")
+    st.markdown("### 💰 第一层：资金面筛选")
 
-    with col1:
-        st.markdown("#### 🔍 基本面漏斗")
-        st.caption("按估值合理性（PE/PB）筛选")
-        pe_max = st.slider("PE上限", 0, 200, 80, 5, key="pe_filter")
-        pb_max = st.slider("PB上限", 0.0, 20.0, 10.0, 0.5, key="pb_filter")
-
-        fundamental_filtered = merged_df.copy()
-        if "pe" in fundamental_filtered.columns:
-            fundamental_filtered = fundamental_filtered[
-                (fundamental_filtered["pe"] > 0) & (fundamental_filtered["pe"] <= pe_max)
-            ]
-        if "pb" in fundamental_filtered.columns:
-            fundamental_filtered = fundamental_filtered[
-                (fundamental_filtered["pb"] > 0) & (fundamental_filtered["pb"] <= pb_max)
-            ]
-
-        fundamental_filtered = fundamental_filtered.sort_values(
-            "fundamental_score", ascending=False
+    col_pct, _ = st.columns([1, 2])
+    with col_pct:
+        cap_pct = st.slider(
+            "资金面头部比例",
+            min_value=10, max_value=50, value=30, step=5,
+            help="取资金面得分最高的前 N% 个股",
+            key="cap_pct_filter",
         )
 
-        st.metric("通过基本面筛选", f"{len(fundamental_filtered)}只 / {len(merged_df)}只")
+    # 按资金面得分全排序
+    capital_ranked = merged_df.sort_values("capital_score", ascending=False)
+    cap_cutoff = max(1, int(total_count * cap_pct / 100))
+    cap_layer = capital_ranked.head(cap_cutoff).copy()
 
-        if not fundamental_filtered.empty:
-            show_cols = ["stock_code", "stock_name", "pe", "pb", "fundamental_score"]
-            show_cols = [c for c in show_cols if c in fundamental_filtered.columns]
-            st.dataframe(
-                fundamental_filtered[show_cols].head(10),
-                use_container_width=True,
-                hide_index=True,
-            )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("全板块个股", f"{total_count} 只")
+    with c2:
+        st.metric(f"资金面 Top {cap_pct}%", f"{len(cap_layer)} 只")
+    with c3:
+        avg_cap = cap_layer["capital_score"].mean() if not cap_layer.empty else 0
+        st.metric("平均资金面得分", f"{avg_cap:.0f}")
 
-    with col2:
-        st.markdown("#### 💰 资金面漏斗")
-        st.caption("按资金流向、动量、活跃度筛选")
-        change_min = st.slider("最低涨幅(%)", -10.0, 10.0, -3.0, 0.5, key="change_filter")
-        turnover_min = st.slider("最低换手率(%)", 0.0, 30.0, 0.5, 0.5, key="turnover_filter")
+    if cap_layer.empty:
+        st.warning("资金面筛选无结果")
+        return
 
-        capital_filtered = merged_df.copy()
-        if "change_pct" in capital_filtered.columns:
-            capital_filtered = capital_filtered[capital_filtered["change_pct"] >= change_min]
-        if "turnover" in capital_filtered.columns:
-            capital_filtered = capital_filtered[capital_filtered["turnover"] >= turnover_min]
+    # 显示资金面 Top 10 预览
+    with st.expander(f"📊 资金面 Top 10 预览（共 {len(cap_layer)} 只）", expanded=False):
+        preview_cols = ["stock_code", "stock_name"]
+        for c in ["change_pct", "turnover", "capital_score"]:
+            if c in cap_layer.columns:
+                preview_cols.append(c)
+        st.dataframe(
+            cap_layer[preview_cols].head(10),
+            column_config={
+                "stock_code": st.column_config.TextColumn("代码"),
+                "stock_name": st.column_config.TextColumn("名称"),
+                "change_pct": st.column_config.NumberColumn("涨跌幅(%)", format="%+.2f"),
+                "turnover": st.column_config.NumberColumn("换手率(%)", format="%.1f"),
+                "capital_score": st.column_config.ProgressColumn("资金得分", format="%.0f", min_value=0, max_value=100),
+            },
+            use_container_width=True,
+            hide_index=True,
+        )
 
-        capital_filtered = capital_filtered.sort_values("capital_score", ascending=False)
-
-        st.metric("通过资金面筛选", f"{len(capital_filtered)}只 / {len(merged_df)}只")
-
-        if not capital_filtered.empty:
-            show_cols = ["stock_code", "stock_name", "change_pct", "turnover", "capital_score"]
-            show_cols = [c for c in show_cols if c in capital_filtered.columns]
-            st.dataframe(
-                capital_filtered[show_cols].head(10),
-                use_container_width=True,
-                hide_index=True,
-            )
-
-    # 综合精选：双重漏斗交集
+    # ============================================================
+    # Layer 2: 基本面 — 从 Layer 1 结果中精选 Top K 只
+    # ============================================================
     st.markdown("---")
-    st.markdown("#### ⭐ 综合精选（双重漏斗交集 Top 5）")
+    st.markdown("### 🔍 第二层：基本面精选")
 
-    if not fundamental_filtered.empty and not capital_filtered.empty:
-        # 取两个过滤结果的交集
-        fundamental_codes = set(fundamental_filtered["stock_code"])
-        capital_codes = set(capital_filtered["stock_code"])
-        intersection_codes = fundamental_codes & capital_codes
+    col_k, _ = st.columns([1, 2])
+    with col_k:
+        final_count = st.slider(
+            "最终标的数",
+            min_value=3, max_value=min(15, len(cap_layer)), value=min(5, len(cap_layer)), step=1,
+            help="从资金面筛选结果中，按基本面得分选出的最终标的数",
+            key="final_count_filter",
+        )
 
-        intersection = merged_df[merged_df["stock_code"].isin(intersection_codes)]
-        intersection = intersection.sort_values("total_score", ascending=False).head(5)
+    # 按基本面得分排序
+    fundamental_ranked = cap_layer.sort_values("fundamental_score", ascending=False)
+    final_pool = fundamental_ranked.head(final_count).copy()
 
-        if not intersection.empty:
-            show_cols = ["stock_code", "stock_name", "pe", "pb", "change_pct",
-                         "turnover", "fundamental_score", "capital_score", "total_score"]
-            show_cols = [c for c in show_cols if c in intersection.columns]
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("待筛选池", f"{len(cap_layer)} 只")
+    with c2:
+        st.metric(f"基本面精选", f"{len(final_pool)} 只")
+    with c3:
+        avg_fund = final_pool["fundamental_score"].mean() if not final_pool.empty else 0
+        st.metric("平均基本面得分", f"{avg_fund:.0f}")
 
-            def highlight_score(val, score_type=""):
-                if pd.isna(val):
-                    return ""
-                if isinstance(val, (int, float)):
-                    if val >= 70:
-                        return "background-color: #C8E6C9; color: #2E7D32"
-                    elif val >= 50:
-                        return "background-color: #FFF9C4; color: #F57F17"
-                return ""
+    # ============================================================
+    # 最终标的池展示
+    # ============================================================
+    st.markdown("---")
+    st.markdown(f"### ⭐ 最终标的池（{len(final_pool)} 只）")
 
-            styled = intersection[show_cols].style.applymap(
-                highlight_score, subset=[c for c in ["total_score", "fundamental_score", "capital_score"] if c in show_cols]
+    if final_pool.empty:
+        st.info("当前条件下无结果，请调整筛选参数")
+        return
+
+    # 构建展示表
+    show_cols = ["stock_code", "stock_name"]
+    for c in ["latest_price", "change_pct", "pe", "pb", "turnover", "capital_score", "fundamental_score"]:
+        if c in final_pool.columns:
+            show_cols.append(c)
+
+    pool_col_config = {
+        "stock_code": st.column_config.TextColumn("代码", width="small"),
+        "stock_name": st.column_config.TextColumn("名称", width="medium"),
+        "latest_price": st.column_config.NumberColumn("最新价", format="%.2f"),
+        "change_pct": st.column_config.NumberColumn("涨跌幅(%)", format="%+.2f"),
+        "pe": st.column_config.NumberColumn("PE", format="%.1f"),
+        "pb": st.column_config.NumberColumn("PB", format="%.2f"),
+        "turnover": st.column_config.NumberColumn("换手(%)", format="%.1f"),
+        "capital_score": st.column_config.ProgressColumn("资金得分", format="%.0f", min_value=0, max_value=100),
+        "fundamental_score": st.column_config.ProgressColumn("基本面得分", format="%.0f", min_value=0, max_value=100),
+    }
+
+    st.dataframe(
+        final_pool[show_cols],
+        column_config={k: v for k, v in pool_col_config.items() if k in show_cols},
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    # 标的卡片
+    st.markdown("---")
+    st.markdown("#### 📌 标的速览")
+    card_cols = st.columns(min(len(final_pool), 5))
+    for i, (_, row) in enumerate(final_pool.iterrows()):
+        with card_cols[i % len(card_cols)]:
+            name = row.get("stock_name", "N/A")
+            code = row.get("stock_code", "")
+            change = row.get("change_pct", None)
+            cap_s = row.get("capital_score", 0)
+            fund_s = row.get("fundamental_score", 0)
+
+            change_str = f"{change:+.2f}%" if change is not None and not pd.isna(change) else "N/A"
+            change_color = "#F44336" if (change or 0) > 0 else ("#4CAF50" if (change or 0) < 0 else "#888")
+
+            st.markdown(
+                f"""
+                <div style="border:1px solid #e0e0e0;border-radius:8px;padding:10px;text-align:center;">
+                    <div style="font-size:14px;font-weight:bold;margin-bottom:2px;">{name}</div>
+                    <div style="font-size:11px;color:#888;margin-bottom:4px;">{code}</div>
+                    <div style="font-size:16px;font-weight:bold;color:{change_color};">{change_str}</div>
+                    <div style="font-size:11px;margin-top:4px;">
+                        资金: {cap_s:.0f} | 基本面: {fund_s:.0f}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            st.dataframe(styled, use_container_width=True, hide_index=True)
-        else:
-            st.info("当前筛选条件下无交集，请放宽筛选条件")
-    else:
-        st.info("请调整筛选条件，确保两边漏斗均有结果后查看交集")
 
 
 def _render_fund_flow_detail(merged_df: pd.DataFrame):
@@ -965,13 +1051,7 @@ def _render_state_transitions(sector_code: str, sector_name: str):
         # 最近 10 次切换
         st.caption(f"最近 10 次状态切换（共 {len(transitions)} 次）")
         tdf = pd.DataFrame(transitions[-10:][::-1])
-        # 按操作建议着色
-        def color_action(val):
-            action = str(val).split("—")[0].strip()
-            c = _ACTION_COLORS.get(action, "#78909C")
-            return f"color:white;background:{c};padding:2px 6px;border-radius:3px;"
-        styled = tdf.style.applymap(color_action, subset=["操作建议"])
-        st.dataframe(styled, use_container_width=True, hide_index=True)
+        st.dataframe(tdf, use_container_width=True, hide_index=True)
     else:
         st.info("该板块暂无状态切换记录")
 
