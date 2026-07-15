@@ -1449,8 +1449,13 @@ def render():
         spot_df = _LOADED_SPOT
 
     if component_df is None or component_df.empty:
-        st.error(f"无法获取成分股数据")
+        st.warning("⚠️ 成分股数据加载失败（网络不稳定或API限流），请稍后重试或切换板块")
+        st.info(f"当前选中: **{sector_label}** — 板块状态/切换信息正常可用")
         return
+
+    if spot_df is None or spot_df.empty:
+        st.warning("⚠️ 实时行情数据加载失败，将以有限字段展示成分股列表")
+        spot_df = pd.DataFrame()
 
     merged_df = build_component_table(component_df, spot_df)
 
