@@ -1433,28 +1433,36 @@ def render():
         return
 
     # ================================================================
-    # 第 3 级：加载成分股 → Tab 展示
+    # 第 3 级：先加载成分股（快），再尝试补充行情数据（慢但非阻塞）
     # ================================================================
-    with st.spinner(f"正在加载成分股数据..."):
-        global _LOADED_COMPONENT_STOCKS, _LOADED_SPOT
+    global _LOADED_COMPONENT_STOCKS, _LOADED_SPOT
 
+    # -- 3a. 成分股加载（快，2-5秒）--
+    with st.spinner(f"正在加载 {sector_label} 成分股..."):
         if selected_sector_code not in _LOADED_COMPONENT_STOCKS:
             component_df = load_component_stocks(selected_sector_code)
             _LOADED_COMPONENT_STOCKS[selected_sector_code] = component_df
         else:
             component_df = _LOADED_COMPONENT_STOCKS[selected_sector_code]
 
-        if _LOADED_SPOT is None:
-            _LOADED_SPOT = load_spot_all()
-        spot_df = _LOADED_SPOT
-
     if component_df is None or component_df.empty:
-        st.warning("⚠️ 成分股数据加载失败（网络不稳定或API限流），请稍后重试或切换板块")
+        st.warning("⚠️ 成分股数据加载失败，请稍后重试或切换板块")
         st.info(f"当前选中: **{sector_label}** — 板块状态/切换信息正常可用")
         return
 
+    # -- 3b. 行情数据补充（可能较慢，独立加载不阻塞）--
+    spot_df = _LOADED_SPOT
+    if _LOADED_SPOT is None:
+        with st.spinner("正在补充实时行情数据（首次加载较慢，约30-60秒）..."):
+            try:
+                spot_df = load_spot_all()
+                if spot_df is not None and not spot_df.empty:
+                    _LOADED_SPOT = spot_df
+            except Exception:
+                spot_df = None
+
     if spot_df is None or spot_df.empty:
-        st.warning("⚠️ 实时行情数据加载失败，将以有限字段展示成分股列表")
+        st.info("💡 实时行情数据暂不可用，正以基础字段展示。刷新页面可重试加载。")
         spot_df = pd.DataFrame()
 
     merged_df = build_component_table(component_df, spot_df)
