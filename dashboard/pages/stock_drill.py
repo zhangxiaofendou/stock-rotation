@@ -927,27 +927,41 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_dat
     st.markdown("---")
     st.markdown("### 🔍 第二层：基本面精选")
 
-    col_k, _ = st.columns([1, 2])
-    with col_k:
-        final_count = st.slider(
-            "最终标的数",
-            min_value=3, max_value=min(15, len(cap_layer)), value=min(5, len(cap_layer)), step=1,
-            help="从资金面筛选结果中，按基本面得分选出的最终标的数",
-            key="final_count_filter",
-        )
+    # 保护：cap_layer 太少时跳过第二层筛选
+    if len(cap_layer) < 3:
+        st.info(f"资金面筛选后仅剩 {len(cap_layer)} 只个股，样本不足跳过第二层基本面精选。以下为全部资金面筛选结果。")
+        final_pool = cap_layer.copy()
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("待筛选池", f"{len(cap_layer)} 只")
+        with c2:
+            st.metric(f"直接输出", f"{len(final_pool)} 只")
+        with c3:
+            avg_fund = final_pool["fundamental_score"].mean() if not final_pool.empty else 0
+            st.metric("平均基本面得分", f"{avg_fund:.0f}")
+    else:
+        col_k, _ = st.columns([1, 2])
+        with col_k:
+            final_count = st.slider(
+                "最终标的数",
+                min_value=min(3, len(cap_layer)), max_value=min(15, len(cap_layer)),
+                value=min(5, len(cap_layer)), step=1,
+                help="从资金面筛选结果中，按基本面得分选出的最终标的数",
+                key="final_count_filter",
+            )
 
-    # 按基本面得分排序
-    fundamental_ranked = cap_layer.sort_values("fundamental_score", ascending=False)
-    final_pool = fundamental_ranked.head(final_count).copy()
+        # 按基本面得分排序
+        fundamental_ranked = cap_layer.sort_values("fundamental_score", ascending=False)
+        final_pool = fundamental_ranked.head(final_count).copy()
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("待筛选池", f"{len(cap_layer)} 只")
-    with c2:
-        st.metric(f"基本面精选", f"{len(final_pool)} 只")
-    with c3:
-        avg_fund = final_pool["fundamental_score"].mean() if not final_pool.empty else 0
-        st.metric("平均基本面得分", f"{avg_fund:.0f}")
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            st.metric("待筛选池", f"{len(cap_layer)} 只")
+        with c2:
+            st.metric(f"基本面精选", f"{len(final_pool)} 只")
+        with c3:
+            avg_fund = final_pool["fundamental_score"].mean() if not final_pool.empty else 0
+            st.metric("平均基本面得分", f"{avg_fund:.0f}")
 
     # ============================================================
     # 最终标的池展示
@@ -1449,6 +1463,7 @@ def render():
     )
 
     all_states = load_all_sector_states()
+    
     if all_states is None or all_states.empty:
         st.error("无法加载板块状态数据，请先运行数据更新")
         return
