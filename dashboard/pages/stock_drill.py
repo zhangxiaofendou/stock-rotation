@@ -61,89 +61,106 @@ def get_state_machine():
 @st.cache_data(ttl=1800)
 def load_spot_all():
     """
-    加载全市场A股实时快照（分市场 + 自定义headers + 本地缓存）
+    加载全市场A股快照（baostock + 本地缓存）
     
-    策略：给 AkShare 内部所有 requests.Session 注入浏览器级 headers，
-    避免东方财富反爬拦截；分三个市场分别请求降低单次负载；
-    成功后缓存到 parquet，失败时从缓存加载。
+    东方财富 push2 API 在部分网络环境被反爬拦截，改用 baostock
+    的 query_daily_history_k_AStock 接口，一次获取全市场日K线数据
+    （含 close/pctChg/peTTM/pbMRQ/turn/volume/amount），
+    约 6 秒完成，数据 T+1 延迟。
+    
+    备份：本地 parquet 缓存，API 失败时降级。
     """
     import time
+    import baostock as bs
     from config.settings import PARQUET_DIR
-    
-    source = get_source()
     
     # ---- 缓存路径 ----
     cache_dir = os.path.join(str(PARQUET_DIR), "cache")
     os.makedirs(cache_dir, exist_ok=True)
     cache_file = os.path.join(cache_dir, "spot_snapshot.parquet")
     
-    # ---- Monkey-patch: 给所有新建 Session 注入浏览器 headers ----
-    _orig_session_init = requests.Session.__init__
+    # ---- 获取最新交易日 ----
+    today = datetime.now()
+    # 尝试今天，如果还没数据则降级到昨天
+    dates_to_try = []
+    for offset in range(5):
+        d = today - timedelta(days=offset)
+        if d.weekday() < 5:  # 排除周末
+            dates_to_try.append(d.strftime("%Y-%m-%d"))
     
-    def _patched_init(self):
-        _orig_session_init(self)
-        self.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept": "*/*",
-            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-            "Referer": "https://quote.eastmoney.com/",
-            "Connection": "keep-alive",
-        })
+    df = None
+    last_err = None
     
-    def _apply_patch():
-        requests.Session.__init__ = _patched_init
-    
-    def _remove_patch():
-        requests.Session.__init__ = _orig_session_init
-    
-    def _try_market(name: str, func, attempt: int = 0) -> pd.DataFrame:
-        """尝试加载单个市场行情，最多重试2次"""
-        for a in range(3):
-            try:
-                _apply_patch()
-                df = func()
-                _remove_patch()
-                if df is not None and not df.empty:
-                    logger.info(f"加载{name}快照成功: {len(df)}只")
-                    return df
-            except Exception as e:
-                _remove_patch()  # 确保恢复
-                if a < 2:
-                    logger.warning(f"加载{name}快照重试{a+1}/2: {e}")
-                    time.sleep(2)
+    for date_str in dates_to_try:
+        try:
+            lg = bs.login()
+            if lg.error_code != "0":
+                logger.warning(f"baostock 登录失败: {lg.error_msg}")
+                continue
+            
+            rs = bs.query_daily_history_k_AStock(date_str)
+            if rs.error_code == "0":
+                # 读取全部数据
+                rows = []
+                while rs.next():
+                    rows.append(rs.get_row_data())
+                
+                if rows:
+                    df = pd.DataFrame(rows, columns=rs.fields)
+                    logger.info(f"baostock 加载 {date_str} 快照: {len(df)} 只")
                 else:
-                    logger.error(f"加载{name}快照失败(已达上限): {e}")
-        return None
+                    logger.info(f"baostock {date_str} 无数据，尝试更早日期")
+            else:
+                logger.warning(f"baostock {date_str} 查询失败: {rs.error_msg}")
+            
+            bs.logout()
+            
+            if df is not None and not df.empty:
+                break
+                
+        except Exception as e:
+            last_err = e
+            try:
+                bs.logout()
+            except Exception:
+                pass
+            logger.warning(f"baostock {date_str} 异常: {e}")
     
-    # ---- 分三个市场分别加载 ----
-    parts = []
-    
-    # 尝试全市场接口（更快）
-    df_all = _try_market("全市场", source.ak.stock_zh_a_spot_em)
-    if df_all is not None:
-        parts.append(df_all)
-    else:
-        # 全市场失败 → 分市场逐一尝试
-        logger.info("全市场API失败，尝试分市场加载...")
-        for mkt_name, mkt_func in [
-            ("沪A", source.ak.stock_sh_a_spot_em),
-            ("深A", source.ak.stock_sz_a_spot_em),
-            ("京A", source.ak.stock_bj_a_spot_em),
-        ]:
-            df_part = _try_market(mkt_name, mkt_func)
-            if df_part is not None:
-                parts.append(df_part)
-    
-    if parts:
-        result = pd.concat(parts, ignore_index=True)
-        logger.info(f"全市场快照加载完成: {len(result)}只")
+    if df is not None and not df.empty:
+        # ---- 转换为 build_component_table 期望的列名 ----
+        # 代码：sh.600000 → 600000
+        df["代码"] = df["code"].str.replace(r"^(sh|sz|bj)\.", "", regex=True).str.zfill(6)
+        
+        _rename = {}
+        for src, dst in {
+            "code_name": "名称",       # baostock 返回的股票名称
+            "close": "最新价",
+            "pctChg": "涨跌幅",
+            "peTTM": "市盈率-动态",
+            "pbMRQ": "市净率",
+            "turn": "换手率",
+            "volume": "成交量",
+            "amount": "成交额",
+        }.items():
+            if src in df.columns:
+                _rename[src] = dst
+        df = df.rename(columns=_rename)
+        
+        # 数值类型转换
+        for col in ["最新价", "涨跌幅", "市盈率-动态", "市净率", "换手率", "成交量", "成交额"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+        
+        logger.info(f"全市场快照加载完成: {len(df)}只 (baostock)")
+        
         # 缓存到本地
         try:
-            result.to_parquet(cache_file, index=False)
+            df.to_parquet(cache_file, index=False)
             logger.info(f"快照缓存已保存: {cache_file}")
         except Exception as e:
             logger.warning(f"快照缓存保存失败: {e}")
-        return result
+        
+        return df
     
     # ---- 所有 API 都失败 → 从缓存恢复 ----
     if os.path.exists(cache_file):
@@ -347,6 +364,14 @@ def build_component_table(component_df: pd.DataFrame, spot_df: pd.DataFrame) -> 
 
     result = pd.DataFrame(result_cols)
     result["stock_code"] = result["stock_code"].astype(str).str.zfill(6)
+
+    # baostock 批量日K API 不含股票名称 → 从 component_df 补充
+    if "stock_name" not in result.columns and "stock_name" in component_df.columns:
+        name_map = dict(zip(
+            component_df["stock_code"].astype(str).str.zfill(6),
+            component_df["stock_name"],
+        ))
+        result["stock_name"] = result["stock_code"].map(name_map)
 
     # 按涨跌幅排序
     if "change_pct" in result.columns:
