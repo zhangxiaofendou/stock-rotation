@@ -58,6 +58,17 @@ def get_state_machine():
 # ============================================================
 # 数据加载（带缓存）
 # ============================================================
+def _resolve_repo_path(*parts: str) -> str:
+    """
+    从当前文件位置解析项目仓库根目录下的相对路径。
+    stock_drill.py → dashboard/pages/stock_drill.py
+    repo_root → stock-rotation/
+    """
+    _here = os.path.dirname(os.path.abspath(__file__))             # .../dashboard/pages
+    _repo_root = os.path.dirname(os.path.dirname(_here))           # .../stock-rotation
+    return os.path.normpath(os.path.join(_repo_root, *parts))
+
+
 @st.cache_data(ttl=1800)
 def load_spot_all():
     """
@@ -162,19 +173,29 @@ def load_spot_all():
         
         return df
     
-    # ---- 所有 API 都失败 → 从缓存恢复 ----
+    # ---- API 失败 → 从运行缓存恢复 ----
     if os.path.exists(cache_file):
         cache_age = time.time() - os.path.getmtime(cache_file)
         cache_hours = cache_age / 3600
-        logger.warning(f"所有API加载失败，使用本地缓存（{cache_hours:.1f}小时前）")
+        logger.warning(f"baostock 加载失败，使用运行缓存（{cache_hours:.1f}小时前）")
         try:
             df = pd.read_parquet(cache_file)
-            logger.info(f"加载缓存快照: {len(df)}只")
+            logger.info(f"加载运行缓存: {len(df)}只")
             return df
         except Exception as e:
-            logger.error(f"加载缓存快照失败: {e}")
+            logger.error(f"加载运行缓存失败: {e}")
     
-    logger.error("无可用快照数据")
+    # ---- 终极兜底：repo 内置缓存文件（不受网络环境影响）----
+    _repo_cache = _resolve_repo_path("data", "cache", "daily_spot.parquet")
+    if os.path.exists(_repo_cache):
+        try:
+            df = pd.read_parquet(_repo_cache)
+            logger.info(f"加载内置缓存: {len(df)}只 (fallback)")
+            return df
+        except Exception as e:
+            logger.error(f"加载内置缓存失败: {e}")
+    
+    logger.error("无可用快照数据（API / 运行缓存 / 内置缓存 均失败）")
     return None
 
 
