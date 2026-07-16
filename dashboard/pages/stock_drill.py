@@ -141,10 +141,12 @@ def load_spot_all():
         # ---- 转换为 build_component_table 期望的列名 ----
         # 代码：sh.600000 → 600000
         df["代码"] = df["code"].str.replace(r"^(sh|sz|bj)\.", "", regex=True).str.zfill(6)
+        # 注意：query_daily_history_k_AStock 不返回 code_name，用代码作为占位符名称
+        # build_component_table 会从 component_df 用真实名称覆盖
+        df["名称"] = df["代码"]
         
         _rename = {}
         for src, dst in {
-            "code_name": "名称",       # baostock 返回的股票名称
             "close": "最新价",
             "pctChg": "涨跌幅",
             "peTTM": "市盈率-动态",
@@ -156,6 +158,10 @@ def load_spot_all():
             if src in df.columns:
                 _rename[src] = dst
         df = df.rename(columns=_rename)
+        
+        # 仅保留下游需要的列
+        keep_cols = ["代码", "名称", "最新价", "涨跌幅", "市盈率-动态", "市净率", "换手率", "成交量", "成交额"]
+        df = df[[c for c in keep_cols if c in df.columns]].copy()
         
         # 数值类型转换
         for col in ["最新价", "涨跌幅", "市盈率-动态", "市净率", "换手率", "成交量", "成交额"]:
@@ -344,21 +350,36 @@ def build_component_table(component_df: pd.DataFrame, spot_df: pd.DataFrame) -> 
     if component_df is None or component_df.empty:
         return pd.DataFrame()
 
+    # ---- 统一成分股代码格式（兼容 .SZ/.SH/.BJ 后缀）----
+    _clean_code = lambda s: str(s).replace("'", "").strip().replace(".SZ", "").replace(".SH", "").replace(".BJ", "").replace(".sz", "").replace(".sh", "").replace(".bj", "").zfill(6)
+    component_codes_normalized = component_df["stock_code"].apply(_clean_code)
+
     if spot_df is None or spot_df.empty:
-        # 没有快照数据，只返回成分股列表
+        # 没有快照数据，只返回成分股列表（保持下游兼容的英文列名）
         result = component_df[["stock_code", "stock_name"]].copy()
-        result["涨跌幅"] = None
+        result["change_pct"] = None
+        result["latest_price"] = None
+        result["pe"] = None
+        result["pb"] = None
+        result["turnover"] = None
+        result["amount"] = None
         return result
 
-    # 统一代码格式
+    # ---- 统一 spot 代码格式 ----
     spot_codes = spot_df["代码"].astype(str).str.zfill(6)
-    component_codes = component_df["stock_code"].astype(str).str.zfill(6)
 
-    # 筛选属于本板块的股票
-    spot_in_sector = spot_df[spot_codes.isin(component_codes)].copy()
+    # 筛选属于本板块的股票（两种格式对比）
+    spot_in_sector = spot_df[spot_codes.isin(component_codes_normalized)].copy()
 
     if spot_in_sector.empty:
-        return component_df[["stock_code", "stock_name"]].copy()
+        result = component_df[["stock_code", "stock_name"]].copy()
+        result["change_pct"] = None
+        result["latest_price"] = None
+        result["pe"] = None
+        result["pb"] = None
+        result["turnover"] = None
+        result["amount"] = None
+        return result
 
     # 提取关键列
     col_map = {
@@ -386,12 +407,9 @@ def build_component_table(component_df: pd.DataFrame, spot_df: pd.DataFrame) -> 
     result = pd.DataFrame(result_cols)
     result["stock_code"] = result["stock_code"].astype(str).str.zfill(6)
 
-    # baostock 批量日K API 不含股票名称 → 从 component_df 补充
-    if "stock_name" not in result.columns and "stock_name" in component_df.columns:
-        name_map = dict(zip(
-            component_df["stock_code"].astype(str).str.zfill(6),
-            component_df["stock_name"],
-        ))
+    # 股票名称以 component_df 为准（spot 可能不含名称或含占位符）
+    if "stock_name" in component_df.columns:
+        name_map = dict(zip(component_codes_normalized, component_df["stock_name"]))
         result["stock_name"] = result["stock_code"].map(name_map)
 
     # 按涨跌幅排序

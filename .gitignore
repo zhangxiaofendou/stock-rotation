@@ -27,5 +27,13 @@ logs/
 .DS_Store
 Thumbs.db
 
+# SSH keys (never commit)
+.ssh/
+
+# Temp & test scripts
+_test_*.py
+serveo_tunnel.sh
+start_dashboard.sh
+
 # Project
 .workbuddy/
