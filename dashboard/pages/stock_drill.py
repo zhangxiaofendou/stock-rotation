@@ -12,6 +12,7 @@ import pandas as pd
 import numpy as np
 import sys
 import os
+import requests
 from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
@@ -59,24 +60,104 @@ def get_state_machine():
 # ============================================================
 @st.cache_data(ttl=1800)
 def load_spot_all():
-    """加载全市场A股实时快照数据（带重试）"""
+    """
+    加载全市场A股实时快照（分市场 + 自定义headers + 本地缓存）
+    
+    策略：给 AkShare 内部所有 requests.Session 注入浏览器级 headers，
+    避免东方财富反爬拦截；分三个市场分别请求降低单次负载；
+    成功后缓存到 parquet，失败时从缓存加载。
+    """
     import time
+    from config.settings import PARQUET_DIR
+    
     source = get_source()
-    last_err = None
-    for attempt in range(3):
+    
+    # ---- 缓存路径 ----
+    cache_dir = os.path.join(str(PARQUET_DIR), "cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = os.path.join(cache_dir, "spot_snapshot.parquet")
+    
+    # ---- Monkey-patch: 给所有新建 Session 注入浏览器 headers ----
+    _orig_session_init = requests.Session.__init__
+    
+    def _patched_init(self):
+        _orig_session_init(self)
+        self.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "Accept": "*/*",
+            "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+            "Referer": "https://quote.eastmoney.com/",
+            "Connection": "keep-alive",
+        })
+    
+    def _apply_patch():
+        requests.Session.__init__ = _patched_init
+    
+    def _remove_patch():
+        requests.Session.__init__ = _orig_session_init
+    
+    def _try_market(name: str, func, attempt: int = 0) -> pd.DataFrame:
+        """尝试加载单个市场行情，最多重试2次"""
+        for a in range(3):
+            try:
+                _apply_patch()
+                df = func()
+                _remove_patch()
+                if df is not None and not df.empty:
+                    logger.info(f"加载{name}快照成功: {len(df)}只")
+                    return df
+            except Exception as e:
+                _remove_patch()  # 确保恢复
+                if a < 2:
+                    logger.warning(f"加载{name}快照重试{a+1}/2: {e}")
+                    time.sleep(2)
+                else:
+                    logger.error(f"加载{name}快照失败(已达上限): {e}")
+        return None
+    
+    # ---- 分三个市场分别加载 ----
+    parts = []
+    
+    # 尝试全市场接口（更快）
+    df_all = _try_market("全市场", source.ak.stock_zh_a_spot_em)
+    if df_all is not None:
+        parts.append(df_all)
+    else:
+        # 全市场失败 → 分市场逐一尝试
+        logger.info("全市场API失败，尝试分市场加载...")
+        for mkt_name, mkt_func in [
+            ("沪A", source.ak.stock_sh_a_spot_em),
+            ("深A", source.ak.stock_sz_a_spot_em),
+            ("京A", source.ak.stock_bj_a_spot_em),
+        ]:
+            df_part = _try_market(mkt_name, mkt_func)
+            if df_part is not None:
+                parts.append(df_part)
+    
+    if parts:
+        result = pd.concat(parts, ignore_index=True)
+        logger.info(f"全市场快照加载完成: {len(result)}只")
+        # 缓存到本地
         try:
-            df = source.ak.stock_zh_a_spot_em()
-            if df is not None and not df.empty:
-                if attempt > 0:
-                    logger.info(f"全市场快照加载成功（第{attempt+1}次尝试）")
-                return df
+            result.to_parquet(cache_file, index=False)
+            logger.info(f"快照缓存已保存: {cache_file}")
         except Exception as e:
-            last_err = e
-            if attempt < 2:
-                logger.warning(f"加载全市场快照失败（第{attempt+1}次），2秒后重试: {e}")
-                time.sleep(2)
-            else:
-                logger.warning(f"加载全市场快照失败（第{attempt+1}次，已达上限）: {e}")
+            logger.warning(f"快照缓存保存失败: {e}")
+        return result
+    
+    # ---- 所有 API 都失败 → 从缓存恢复 ----
+    if os.path.exists(cache_file):
+        cache_age = time.time() - os.path.getmtime(cache_file)
+        cache_hours = cache_age / 3600
+        logger.warning(f"所有API加载失败，使用本地缓存（{cache_hours:.1f}小时前）")
+        try:
+            df = pd.read_parquet(cache_file)
+            logger.info(f"加载缓存快照: {len(df)}只")
+            return df
+        except Exception as e:
+            logger.error(f"加载缓存快照失败: {e}")
+    
+    logger.error("无可用快照数据")
     return None
 
 
