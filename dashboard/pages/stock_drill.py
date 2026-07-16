@@ -59,14 +59,24 @@ def get_state_machine():
 # ============================================================
 @st.cache_data(ttl=1800)
 def load_spot_all():
-    """加载全市场A股实时快照数据"""
+    """加载全市场A股实时快照数据（带重试）"""
+    import time
     source = get_source()
-    try:
-        df = source.ak.stock_zh_a_spot_em()
-        if df is not None and not df.empty:
-            return df
-    except Exception as e:
-        logger.warning(f"加载全市场快照失败: {e}")
+    last_err = None
+    for attempt in range(3):
+        try:
+            df = source.ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                if attempt > 0:
+                    logger.info(f"全市场快照加载成功（第{attempt+1}次尝试）")
+                return df
+        except Exception as e:
+            last_err = e
+            if attempt < 2:
+                logger.warning(f"加载全市场快照失败（第{attempt+1}次），2秒后重试: {e}")
+                time.sleep(2)
+            else:
+                logger.warning(f"加载全市场快照失败（第{attempt+1}次，已达上限）: {e}")
     return None
 
 
@@ -371,13 +381,16 @@ def calculate_capital_score(row: dict) -> float:
 # 渲染函数
 # ============================================================
 
-def _render_component_list(merged_df: pd.DataFrame, sector_name: str):
+def _render_component_list(merged_df: pd.DataFrame, sector_name: str, has_spot_data: bool = True):
     """渲染成分股排名列表"""
     if merged_df.empty:
         st.warning("暂无该板块成分股数据")
         return
 
     st.subheader(f"📋 {sector_name} 成分股排名 ({len(merged_df)}只)")
+
+    if not has_spot_data:
+        st.warning("⚠️ 实时行情数据暂时不可用，仅展示成分股基本信息。涨跌幅、PE、PB 等指标无法显示。")
 
     # 构建展示表
     display_cols = []
@@ -396,7 +409,6 @@ def _render_component_list(merged_df: pd.DataFrame, sector_name: str):
         col_config["latest_price"] = st.column_config.NumberColumn("最新价", format="%.2f")
 
     if "change_pct" in merged_df.columns:
-        # 创建涨跌幅色阶列
         display_cols.append("change_pct")
         col_config["change_pct"] = st.column_config.NumberColumn(
             "涨跌幅(%)", format="%+.2f",
@@ -446,20 +458,35 @@ def _render_component_list(merged_df: pd.DataFrame, sector_name: str):
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
-            up_count = len(merged_df[merged_df.get("change_pct", pd.Series([0]*len(merged_df))) > 0]) if "change_pct" in merged_df.columns else 0
-            down_count = len(merged_df[merged_df.get("change_pct", pd.Series([0]*len(merged_df))) < 0]) if "change_pct" in merged_df.columns else 0
-            st.metric("上涨家数", up_count)
+            if "change_pct" in merged_df.columns and merged_df["change_pct"].notna().any():
+                up_count = int((merged_df["change_pct"] > 0).sum())
+                st.metric("上涨家数", up_count)
+            else:
+                st.metric("上涨家数", "--")
+
         with col2:
-            st.metric("下跌家数", down_count)
+            if "change_pct" in merged_df.columns and merged_df["change_pct"].notna().any():
+                down_count = int((merged_df["change_pct"] < 0).sum())
+                st.metric("下跌家数", down_count)
+            else:
+                st.metric("下跌家数", "--")
+
         with col3:
-            if "change_pct" in merged_df.columns:
+            if "change_pct" in merged_df.columns and merged_df["change_pct"].notna().any():
                 avg_change = merged_df["change_pct"].mean()
                 st.metric("平均涨跌幅", f"{avg_change:+.2f}%")
+            else:
+                st.metric("平均涨跌幅", "--")
+
         with col4:
             if "pe" in merged_df.columns:
                 valid_pe = merged_df["pe"][merged_df["pe"] > 0]
                 if not valid_pe.empty:
                     st.metric("PE中位数", f"{valid_pe.median():.1f}")
+                else:
+                    st.metric("PE中位数", "--")
+            else:
+                st.metric("PE中位数", "--")
 
 
 def _render_leaders(merged_df: pd.DataFrame, sector_name: str):
@@ -600,22 +627,27 @@ def _render_mini_kline(stock_code: str, stock_name: str):
     st.plotly_chart(fig, use_container_width=True)
 
 
-def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str):
+def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_data: bool = True):
     """双重漏斗选股：资金面 Top N% → 基本面 Top K 只，顺序筛选"""
     if merged_df.empty:
         st.warning("暂无选股数据")
         return
 
     st.subheader(f"🎯 双重漏斗选股 — {sector_name}")
-    st.caption("顺序筛选：先资金面筛出 Top 30%，再基本面从中精选 Top 5-10 只")
+
+    if not has_spot_data:
+        st.warning("⚠️ 实时行情数据暂不可用，资金面和基本面得分均为默认值 50，筛选结果仅供参考。请等待行情数据加载完成后刷新。")
+    else:
+        st.caption("顺序筛选：先资金面筛出 Top 30%，再基本面从中精选 Top 5-10 只")
 
     # ---- 计算各维度得分 ----
-    if "pe" in merged_df.columns and "pb" in merged_df.columns:
+    if "pe" in merged_df.columns and merged_df["pe"].notna().any() and "pb" in merged_df.columns:
         merged_df["fundamental_score"] = merged_df.apply(calculate_fundamental_score, axis=1)
     else:
         merged_df["fundamental_score"] = 50.0
 
-    if "change_pct" in merged_df.columns or "turnover" in merged_df.columns:
+    if ("change_pct" in merged_df.columns and merged_df["change_pct"].notna().any()) or \
+       ("turnover" in merged_df.columns and merged_df["turnover"].notna().any()):
         merged_df["capital_score"] = merged_df.apply(calculate_capital_score, axis=1)
     else:
         merged_df["capital_score"] = 50.0
@@ -1266,13 +1298,13 @@ def render():
     ])
 
     with tab1:
-        _render_component_list(merged_df, sector_label)
+        _render_component_list(merged_df, sector_label, has_spot_data=(spot_df is not None and not spot_df.empty))
 
     with tab2:
         _render_leaders(merged_df, sector_label)
 
     with tab3:
-        _render_stock_funnel(merged_df, sector_label)
+        _render_stock_funnel(merged_df, sector_label, has_spot_data=(spot_df is not None and not spot_df.empty))
 
     with tab4:
         st.subheader("📈 个股详情查询")
