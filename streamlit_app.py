@@ -1,7 +1,8 @@
 """
-Streamlit Cloud 入口文件
-=======================
+Streamlit Cloud 入口文件 v2.0 — baostock 数据源
+================================================
 将 dashboard/app.py 作为主入口运行。
+DEP RECONCILE: baostock>=0.8.8 replaces akshare for spot market data.
 """
 import sys
 import os
