@@ -232,25 +232,32 @@ def load_component_stocks(sector_code: str):
 
 @st.cache_data(ttl=1800)
 def load_stock_fund_flow(stock_code: str):
-    """加载个股资金流"""
-    source = get_source()
-    # 判断市场
-    code = str(stock_code).zfill(6)
-    if code.startswith(("6", "5")):
-        market = "sh"
-    else:
-        market = "sz"
+    """加载个股资金流（带超时保护，东财 API 可能不可用）"""
+    import concurrent.futures
+
+    def _fetch():
+        source = get_source()
+        code = str(stock_code).zfill(6)
+        if code.startswith(("6", "5")):
+            market = "sh"
+        else:
+            market = "sz"
+        return source.get_stock_individual_fund_flow(stock=code, market=market)
+
     try:
-        df = source.get_stock_individual_fund_flow(stock=code, market=market)
-        return df
-    except Exception as e:
-        logger.warning(f"加载个股资金流 {code} 失败: {e}")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            return future.result(timeout=8)
+    except (concurrent.futures.TimeoutError, Exception) as e:
+        logger.warning(f"加载个股资金流 {stock_code} 超时/失败: {e}")
         return None
 
 
 @st.cache_data(ttl=86400)
 def load_stock_hist_cached(stock_code: str, days: int = 30):
-    """加载个股历史行情（优先本地缓存，其次 API）"""
+    """加载个股历史行情（优先本地缓存 → baostock API）"""
+    import baostock as bs
+
     store = get_store()
     code = str(stock_code).zfill(6)
 
@@ -262,41 +269,104 @@ def load_stock_hist_cached(stock_code: str, days: int = 30):
         df = df.sort_values("date").reset_index(drop=True)
         return df.tail(days)
 
-    # 本地没有，从 API 拉取
-    source = get_source()
-    end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
+    # 本地没有 → baostock API
+    end = datetime.now().strftime("%Y-%m-%d")
+    start = (datetime.now() - timedelta(days=days + 60)).strftime("%Y-%m-%d")
+
+    # 确定市场前缀
+    if code.startswith(("6", "5")):
+        bs_code = f"sh.{code}"
+    elif code.startswith(("0", "3", "2")):
+        bs_code = f"sz.{code}"
+    elif code.startswith(("8", "4")):
+        bs_code = f"bj.{code}"
+    else:
+        bs_code = f"sh.{code}"  # 默认上交所
+
     try:
-        df = source.get_stock_hist(symbol=code, start=start, end=end, adjust="qfq")
-        if df is not None and not df.empty:
-            if "日期" in df.columns:
-                df = df.rename(columns={"日期": "date"})
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date").reset_index(drop=True)
-        return df
+        lg = bs.login()
+        if lg.error_code != "0":
+            logger.warning(f"baostock 登录失败: {lg.error_msg}")
+            return None
+
+        rs = bs.query_history_k_data_plus(
+            bs_code,
+            "date,open,high,low,close,preclose,volume,amount,turn,pctChg,peTTM,pbMRQ",
+            start_date=start,
+            end_date=end,
+            frequency="d",
+            adjustflag="2",  # 前复权
+        )
+
+        if rs.error_code != "0":
+            logger.warning(f"baostock 查询 {bs_code} 失败: {rs.error_msg}")
+            bs.logout()
+            return None
+
+        rows = []
+        while rs.next():
+            rows.append(rs.get_row_data())
+
+        bs.logout()
+
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows, columns=rs.fields)
+
+        # 数值转换
+        for col in ["open", "high", "low", "close", "preclose", "volume", "amount", "turn", "pctChg", "peTTM", "pbMRQ"]:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+
+        df = df.dropna(subset=["close"]).sort_values("date").reset_index(drop=True)
+
+        # 保存到本地缓存
+        try:
+            # 只保留核心列避免缓存过大
+            cache_cols = ["date", "open", "high", "low", "close", "volume"]
+            cache_df = df[[c for c in cache_cols if c in df.columns]].copy()
+            store.save_stock_hist(code, cache_df)
+        except Exception as e:
+            logger.warning(f"保存个股 {code} 历史缓存失败: {e}")
+
+        return df.tail(days)
+
     except Exception as e:
         logger.warning(f"加载个股历史 {code} 失败: {e}")
+        try:
+            bs.logout()
+        except Exception:
+            pass
         return None
 
 
 @st.cache_data(ttl=86400)
 def load_financial_summary(stock_code: str):
-    """加载个股财务摘要（ROE、营收增速等）"""
-    source = get_source()
-    code = str(stock_code).zfill(6)
-    try:
-        # 使用东方财富业绩报表接口
+    """加载个股财务摘要（ROE、营收增速等，带超时保护）"""
+    import concurrent.futures
+
+    def _fetch():
+        source = get_source()
+        code = str(stock_code).zfill(6)
         df = source.ak.stock_yjbb_em(date=(datetime.now() - timedelta(days=365)).strftime("%Y%m%d"))
         if df is not None and not df.empty:
-            # 筛选该股票
             mask = df["股票代码"].astype(str).str.zfill(6) == code
             stock_df = df[mask]
             if not stock_df.empty:
                 return stock_df.iloc[0].to_dict()
-    except Exception as e:
-        logger.warning(f"加载财务摘要 {code} 失败: {e}")
-    return None
+        return None
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(_fetch)
+            return future.result(timeout=8)
+    except (concurrent.futures.TimeoutError, Exception) as e:
+        logger.warning(f"加载财务摘要 {stock_code} 超时/失败: {e}")
+        return None
 
 
 # ============================================================
