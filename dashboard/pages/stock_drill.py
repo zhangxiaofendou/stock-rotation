@@ -668,7 +668,7 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str):
                 "stock_name": st.column_config.TextColumn("名称"),
                 "change_pct": st.column_config.NumberColumn("涨跌幅(%)", format="%+.2f"),
                 "turnover": st.column_config.NumberColumn("换手率(%)", format="%.1f"),
-                "capital_score": st.column_config.ProgressColumn("资金得分", format="%.0f", min_value=0, max_value=100),
+                "capital_score": st.column_config.NumberColumn("资金得分", format="%.0f"),
             },
             use_container_width=True,
             hide_index=True,
@@ -726,8 +726,8 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str):
         "pe": st.column_config.NumberColumn("PE", format="%.1f"),
         "pb": st.column_config.NumberColumn("PB", format="%.2f"),
         "turnover": st.column_config.NumberColumn("换手(%)", format="%.1f"),
-        "capital_score": st.column_config.ProgressColumn("资金得分", format="%.0f", min_value=0, max_value=100),
-        "fundamental_score": st.column_config.ProgressColumn("基本面得分", format="%.0f", min_value=0, max_value=100),
+        "capital_score": st.column_config.NumberColumn("资金得分", format="%.0f"),
+        "fundamental_score": st.column_config.NumberColumn("基本面得分", format="%.0f"),
     }
 
     st.dataframe(

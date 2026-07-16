@@ -64,7 +64,7 @@ def get_circuit_breaker():
     return CircuitBreaker(parquet_store, sm)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_market_data():
     """加载市场数据（1小时缓存）"""
     sm = get_state_machine()

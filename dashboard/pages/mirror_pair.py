@@ -147,10 +147,8 @@ def _render_mirror_table(mirror_pairs: list):
         use_container_width=True,
         hide_index=True,
         column_config={
-            "置信度": st.column_config.ProgressColumn(
+            "置信度": st.column_config.NumberColumn(
                 format="%.1f%%",
-                min_value=0,
-                max_value=100,
             ),
         },
     )
