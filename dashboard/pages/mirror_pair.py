@@ -121,9 +121,9 @@ def _render_mirror_table(mirror_pairs: list):
         table_data.append({
             "弱板块": f"{STATE_EMOJI.get(mp['weak_state'], '')} {mp['weak_name']}",
             "弱状态": mp["weak_state"],
+            "关联组": mp["group"],
             "强板块": f"{STATE_EMOJI.get(mp['strong_state'], '')} {mp['strong_name']}",
             "强状态": mp["strong_state"],
-            "关联组": mp["group"],
             "配对类型": mp["pair_type"],
             "置信度": f"{mp['confidence']:.1%}",
         })
