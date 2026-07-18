@@ -109,10 +109,8 @@ def load_state_df():
     return sm.calc_all_sectors_state()
 
 
-@st.cache_data(ttl=86400)
-@st.cache_data(ttl=3600)
 def load_score_df():
-    """加载板块评分排行（带 Streamlit 缓存 + 列完整性兜底）"""
+    """加载板块评分排行（带列完整性兜底）"""
     _, scoring = get_models()
     score_df = scoring.calc_all_scores()
 
@@ -128,7 +126,17 @@ def load_score_df():
                     os.remove(snapshot_path)
             except OSError:
                 pass
+            # 清除 Streamlit 数据缓存，确保重算不走任何缓存
+            st.cache_data.clear()
             score_df = scoring.calc_all_scores()
+            # 二次检查：若仍缺列，说明数据损坏无法自动恢复
+            still_missing = [c for c in required if score_df is None or c not in score_df.columns]
+            if still_missing:
+                st.error(
+                    f"评分数据无法自动恢复，仍缺少列：{still_missing}。"
+                    f"请手动删除 {snapshot_path} 后刷新页面，或重新运行数据更新流程。"
+                )
+                return None
     return score_df
 
 
