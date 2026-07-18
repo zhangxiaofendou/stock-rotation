@@ -78,9 +78,10 @@ def _render_sankey(mirror_pairs: list):
 
     fig = go.Figure(
         go.Sankey(
+            textfont={"size": 16, "color": "black", "family": "Arial, sans-serif"},
             node={
-                "pad": 15,
-                "thickness": 20,
+                "pad": 18,
+                "thickness": 30,
                 "line": {"color": "gray", "width": 0.5},
                 "label": node_labels,
                 "color": node_colors,
@@ -97,11 +98,11 @@ def _render_sankey(mirror_pairs: list):
     fig.update_layout(
         title=dict(
             text="资金迁移路径（弱→强）",
-            font={"size": 14, "color": "black"},
+            font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
         ),
-        height=400 + len(node_labels) * 20,
-        margin={"l": 10, "r": 10, "t": 40, "b": 10},
-        font={"size": 12, "color": "black"},
+        height=500 + len(node_labels) * 25,
+        margin={"l": 10, "r": 10, "t": 50, "b": 10},
+        font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
         paper_bgcolor="white",
     )
 
