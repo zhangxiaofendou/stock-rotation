@@ -110,11 +110,12 @@ def main():
 
         st.markdown("---")
 
-        # 导航
-        page = st.radio(
-            "导航菜单",
+        # 导航（刷新保留、关页重置）
+        from dashboard.components.nav_state import persistent_radio
+        page = persistent_radio(
+            "page",
             ["市场温度计", "板块轮动监控"],
-            index=0,  # 默认选中市场温度计（首个页签为市场概览）
+            label="导航菜单",
         )
 
         st.markdown("---")

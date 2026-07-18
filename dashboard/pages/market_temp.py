@@ -110,11 +110,15 @@ def render():
     st.title("市场温度计")
     st.markdown("监控整体市场环境、板块状态分布和风格强弱")
 
-    tab1, tab2 = st.tabs(["市场概览", "镜像对监控"])
-    with tab1:
+    from dashboard.components.nav_state import persistent_tabs
+    from dashboard.pages.mirror_pair import render as render_mirror
+
+    MARKET_TEMP_TABS = ["市场概览", "镜像对监控"]
+    active = persistent_tabs("market_temp_tab", MARKET_TEMP_TABS)
+
+    if active == "市场概览":
         _render_market_overview()
-    with tab2:
-        from dashboard.pages.mirror_pair import render as render_mirror
+    elif active == "镜像对监控":
         render_mirror(show_header=False)
 
 

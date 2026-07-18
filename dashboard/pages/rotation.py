@@ -32,6 +32,7 @@ from dashboard.components.drill_pickers import (
     render_sector_picker,
 )
 from dashboard.pages.stock_drill import render as render_stock_drill
+from dashboard.components.nav_state import persistent_tabs
 
 # 状态颜色映射
 STATE_BG_COLORS = {
@@ -45,6 +46,45 @@ STATE_BG_COLORS = {
     "⑧下跌中继": "background-color: #FFEBEE;",
     "⑨底背离":   "background-color: #E8F5E9;",
 }
+
+# ================================================================
+# 综合评分维度（与 model/scoring.py 的 WEIGHTS 保持一致）
+#   四维度分值 + 综合评分，所有展示分值的地方统一呈现
+# ================================================================
+SCORE_DIM_LABELS = [
+    ("RS横截面",   "rs_cross_score",   0.30),
+    ("动量横截面", "mom_cross_score",  0.30),
+    ("RS时序分位", "rs_position_score", 0.20),
+    ("动量时序分位", "rs_momentum_score", 0.20),
+]
+SCORE_WEIGHT_NOTE = (
+    "综合评分 = 30%·RS横截面 + 30%·动量横截面 + 20%·RS时序分位 + 20%·动量时序分位"
+    "（横截面为主负责横向选强，时序为辅负责过滤确认）"
+)
+
+
+def _render_score_breakdown(score_row: pd.Series):
+    """渲染综合评分明细：4 个维度分值 + 综合评分 + 各维度权重。
+
+    参数:
+        score_row: score_df 中某板块的一行（含 score / rs_cross_score /
+                   mom_cross_score / rs_position_score / rs_momentum_score）
+    """
+    st.subheader("综合评分明细")
+    st.caption(SCORE_WEIGHT_NOTE)
+
+    score = score_row.get("score")
+    if pd.notna(score):
+        st.markdown(f"### 综合评分：{score:.1f}")
+    else:
+        st.markdown("### 综合评分：N/A")
+
+    cols = st.columns(4)
+    for (label, key, w), c in zip(SCORE_DIM_LABELS, cols):
+        with c:
+            val = score_row.get(key)
+            st.metric(label, f"{val:.1f}" if pd.notna(val) else "N/A")
+            st.caption(f"权重 {w:.0%}")
 
 
 @st.cache_resource
@@ -541,14 +581,15 @@ def render():
         return
 
     # ================================================================
-    # Tab切换：热力图 | 板块详情 | 趋势验证 | 个股下钻
     # ================================================================
-    tab1, tab2, tab3, tab4 = st.tabs(["九宫格热力图", "板块详情", "趋势验证", "个股下钻"])
+    # 受控 Tab 切换（刷新保留、关页重置）
+    # ================================================================
+    ROTATION_TABS = ["九宫格热力图", "板块详情", "趋势验证", "个股下钻"]
+    active_tab = persistent_tabs("rotation_tab", ROTATION_TABS)
 
-    # ================================================================
-    # Tab 1: 九宫格热力图
-    # ================================================================
-    with tab1:
+
+    def _render_heatmap_tab(state_df):
+        """九宫格热力图页签内容"""
         st.subheader("九宫格板块分布热力图")
         st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向")
 
@@ -586,9 +627,9 @@ def render():
                         with c3:
                             st.markdown(f"RS动量: {row['rs_momentum_percentile']:.1f}%")
 
-    # ================================================================
-    # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
-    # ================================================================
+        # ================================================================
+        # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
+        # ================================================================
     def _render_detail_tab(state_df, score_df):
         """板块详情（原独立页面迁入）。
 
@@ -649,12 +690,12 @@ def render():
         if not sector_info.empty:
             info = sector_info.iloc[0]
 
-            # 获取评分（复用排行数据，避免重复计算）
-            score_val = None
+            # 获取评分明细（复用排行数据，避免重复计算）
+            _detail_score_row = None
             if score_df is not None:
-                score_row = score_df[score_df["sector_code"] == selected_code]
-                if not score_row.empty:
-                    score_val = score_row.iloc[0]["score"]
+                _srow = score_df[score_df["sector_code"] == selected_code]
+                if not _srow.empty:
+                    _detail_score_row = _srow.iloc[0]
 
             # 获取前一状态和建议
             prev_state = "⑤中性震荡"
@@ -675,7 +716,10 @@ def render():
                     unsafe_allow_html=True,
                 )
             with col2:
-                st.metric("综合评分", f"{score_val:.1f}" if score_val is not None else "N/A")
+                if _detail_score_row is not None and pd.notna(_detail_score_row.get("score")):
+                    st.metric("综合评分", f"{_detail_score_row['score']:.1f}")
+                else:
+                    st.metric("综合评分", "N/A")
                 st.metric("价格趋势", info["trend"])
             with col3:
                 st.metric("RS分位", f"{info['rs_percentile']:.1f}%" if info.get("rs_percentile") is not None else "N/A")
@@ -684,6 +728,10 @@ def render():
                 st.metric("前一日状态", prev_state)
                 if suggestion:
                     st.info(suggestion)
+
+            # 评分明细：4 维度分值 + 综合评分 + 权重
+            if _detail_score_row is not None:
+                _render_score_breakdown(_detail_score_row)
 
         # ================================================================
         # K线图
@@ -719,18 +767,12 @@ def render():
                 display_series = display_series.sort_values("date", ascending=False)
                 st.dataframe(display_series, use_container_width=True, hide_index=True)
 
-    # ================================================================
-    # Tab 2 调用：必须在 _render_detail_tab 定义之后
-    # ================================================================
-    with tab2:
-        _render_detail_tab(state_df, score_df)
-
-    # ================================================================
-    # Tab 3: 趋势验证（板块趋势对照 + 250日K线）
-    # ================================================================
-    with tab3:
+        # ================================================================
+        # 趋势验证页签（板块趋势对照 + 250日K线）
+        # ================================================================
+    def _render_trend_tab(state_df, score_df):
         st.subheader("板块趋势验证（价格趋势 vs K线）")
-        st.caption("对照全板块「绝对价格趋势（含横盘穿越天数角标）、综合评分、RS分位、动量分位、横截面排名、九宫格状态」与 250 日 K 线，人工验证状态判定合理性。")
+        st.caption("对照全板块「绝对价格趋势（含横盘穿越天数角标）、综合评分与 4 个维度分值（RS横截面/动量横截面/RS时序/动量时序）、九宫格状态」与 250 日 K 线，人工验证状态判定合理性。")
 
         st.info(
             "📐 趋势分界线：上穿60日线 = 上涨（红）｜ 击穿60日线 = 下跌（绿）｜ "
@@ -746,25 +788,32 @@ def render():
             data_date = str(state_df["date"].iloc[0])[:10] if "date" in state_df.columns else "未知"
             st.caption(f"📅 数据截面：{data_date}　共 {len(state_df)} 个板块")
 
-            # 综合评分映射（取自板块强弱排行的 score_df）
+            # 综合评分明细映射（取自 score_df，含 4 维度 + 综合）
             score_map = {}
             if score_df is not None and not score_df.empty:
-                score_map = {
-                    str(c): s for c, s in zip(score_df["sector_code"], score_df["score"])
-                }
+                for _, sr in score_df.iterrows():
+                    score_map[str(sr["sector_code"])] = {
+                        "score": sr["score"],
+                        "rs_cross": sr["rs_cross_score"],
+                        "mom_cross": sr["mom_cross_score"],
+                        "rs_pos": sr["rs_position_score"],
+                        "mom_pos": sr["rs_momentum_score"],
+                    }
 
             # 组装显示表
             rows = []
             for _, r in state_df.iterrows():
                 code = r["sector_code"]
                 badge = badge_map.get(code, 0)
+                sm = score_map.get(str(code))
                 rows.append({
                     "板块名称": r["sector_name"],
                     "趋势": _trend_text(r["trend"], badge),
-                    "RS分位(%)": round(float(r["rs_percentile"]), 1) if r["rs_percentile"] is not None else None,
-                    "动量分位(%)": round(float(r["rs_momentum_percentile"]), 1) if r["rs_momentum_percentile"] is not None else None,
-                    "横截面(%)": round(float(r["rs_momentum_cross_pct"]), 1) if r.get("rs_momentum_cross_pct") is not None else None,
-                    "综合评分": round(float(score_map[str(code)]), 1) if str(code) in score_map and score_map[str(code)] is not None else None,
+                    "RS横截面(%)": round(float(sm["rs_cross"]), 1) if sm and pd.notna(sm["rs_cross"]) else None,
+                    "动量横截面(%)": round(float(sm["mom_cross"]), 1) if sm and pd.notna(sm["mom_cross"]) else None,
+                    "RS时序分位(%)": round(float(sm["rs_pos"]), 1) if sm and pd.notna(sm["rs_pos"]) else None,
+                    "动量时序分位(%)": round(float(sm["mom_pos"]), 1) if sm and pd.notna(sm["mom_pos"]) else None,
+                    "综合评分": round(float(sm["score"]), 1) if sm and pd.notna(sm["score"]) else None,
                     "九宫格状态": f"{STATE_EMOJI.get(r['state'], '')} {r['state']}",
                     "板块代码": code,
                 })
@@ -776,6 +825,7 @@ def render():
             df = df.sort_values("_o").drop(columns="_o").reset_index(drop=True)
 
             st.subheader("全板块趋势对照（点击左侧行查看右侧K线）")
+            st.caption(SCORE_WEIGHT_NOTE)
 
             colL, colR = st.columns([0.95, 1.05])
 
@@ -791,9 +841,10 @@ def render():
                     column_config={
                         "板块名称": st.column_config.TextColumn("板块名称", width="medium"),
                         "趋势": st.column_config.TextColumn("趋势", width="small"),
-                        "RS分位(%)": st.column_config.NumberColumn("RS分位(%)", format="%.1f", width="small"),
-                        "动量分位(%)": st.column_config.NumberColumn("动量分位(%)", format="%.1f", width="small"),
-                        "横截面(%)": st.column_config.NumberColumn("横截面(%)", format="%.1f", width="small"),
+                        "RS横截面(%)": st.column_config.NumberColumn("RS横截面(%)", format="%.1f", width="small"),
+                        "动量横截面(%)": st.column_config.NumberColumn("动量横截面(%)", format="%.1f", width="small"),
+                        "RS时序分位(%)": st.column_config.NumberColumn("RS时序分位(%)", format="%.1f", width="small"),
+                        "动量时序分位(%)": st.column_config.NumberColumn("动量时序分位(%)", format="%.1f", width="small"),
                         "综合评分": st.column_config.NumberColumn("综合评分", format="%.1f", width="small"),
                         "九宫格状态": st.column_config.TextColumn("九宫格状态", width="medium"),
                         "板块代码": st.column_config.TextColumn("代码", width="small"),
@@ -845,9 +896,15 @@ def render():
                 _render_kline_chart(kline, chosen_name)
 
     # ================================================================
-    # Tab 4: 个股下钻（原独立页面迁入，作为一个页签）
+    # 受控 Tab 分发（依赖上面已定义的 _render_detail_tab / _render_trend_tab）
     # ================================================================
-    with tab4:
+    if active_tab == "九宫格热力图":
+        _render_heatmap_tab(state_df)
+    elif active_tab == "板块详情":
+        _render_detail_tab(state_df, score_df)
+    elif active_tab == "趋势验证":
+        _render_trend_tab(state_df, score_df)
+    elif active_tab == "个股下钻":
         render_stock_drill()
 
 
