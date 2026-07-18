@@ -837,12 +837,12 @@ def render():
                 rows.append({
                     "板块名称": r["sector_name"],
                     "趋势": _trend_text(r["trend"], badge),
+                    "九宫格状态": f"{STATE_EMOJI.get(r['state'], '')} {r['state']}",
+                    "综合评分": round(float(sm["score"]), 1) if sm and pd.notna(sm["score"]) else None,
                     "RS横截面(%)": round(float(sm["rs_cross"]), 1) if sm and pd.notna(sm["rs_cross"]) else None,
                     "动量横截面(%)": round(float(sm["mom_cross"]), 1) if sm and pd.notna(sm["mom_cross"]) else None,
                     "RS时序分位(%)": round(float(sm["rs_pos"]), 1) if sm and pd.notna(sm["rs_pos"]) else None,
                     "动量时序分位(%)": round(float(sm["mom_pos"]), 1) if sm and pd.notna(sm["mom_pos"]) else None,
-                    "综合评分": round(float(sm["score"]), 1) if sm and pd.notna(sm["score"]) else None,
-                    "九宫格状态": f"{STATE_EMOJI.get(r['state'], '')} {r['state']}",
                     "板块代码": code,
                 })
             df = pd.DataFrame(rows)
@@ -869,12 +869,12 @@ def render():
                     column_config={
                         "板块名称": st.column_config.TextColumn("板块名称", width="medium"),
                         "趋势": st.column_config.TextColumn("趋势", width="small"),
+                        "九宫格状态": st.column_config.TextColumn("九宫格状态", width="medium"),
+                        "综合评分": st.column_config.NumberColumn("综合评分", format="%.1f", width="small"),
                         "RS横截面(%)": st.column_config.NumberColumn("RS横截面(%)", format="%.1f", width="small"),
                         "动量横截面(%)": st.column_config.NumberColumn("动量横截面(%)", format="%.1f", width="small"),
                         "RS时序分位(%)": st.column_config.NumberColumn("RS时序分位(%)", format="%.1f", width="small"),
                         "动量时序分位(%)": st.column_config.NumberColumn("动量时序分位(%)", format="%.1f", width="small"),
-                        "综合评分": st.column_config.NumberColumn("综合评分", format="%.1f", width="small"),
-                        "九宫格状态": st.column_config.TextColumn("九宫格状态", width="medium"),
                         "板块代码": st.column_config.TextColumn("代码", width="small"),
                     },
                 )
