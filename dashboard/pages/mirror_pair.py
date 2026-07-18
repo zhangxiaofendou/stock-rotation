@@ -1,13 +1,12 @@
 """
 镜像对监控页面
 ==============
-展示镜像对列表、资金迁移网络图、信号验证。
+展示镜像对列表、资金迁移网络图。
 """
 
 import streamlit as st
 import plotly.graph_objects as go
 import pandas as pd
-import numpy as np
 import sys
 import os
 
@@ -17,14 +16,7 @@ from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.mirror_pair import MirrorPair
-from config.sector_map import get_sector_name, SECTOR_GROUPS
-from dashboard.components.state_card import STATE_COLORS, STATE_EMOJI
-from dashboard.components.drill_pickers import (
-    load_all_sector_states as _load_drill_states,
-    render_state_picker,
-    render_transition_picker,
-    render_sector_picker,
-)
+from dashboard.components.state_card import STATE_EMOJI
 
 
 @st.cache_resource
@@ -46,13 +38,6 @@ def load_mirror_data():
     _, mirror = get_models()
     mirror_pairs = mirror.find_mirror_pairs()
     return mirror_pairs
-
-
-@st.cache_data(ttl=86400)
-def load_state_for_mirror():
-    """加载板块状态（独立缓存）"""
-    sm, _ = get_models()
-    return sm.calc_all_sectors_state()
 
 
 def _render_sankey(mirror_pairs: list):
@@ -158,93 +143,6 @@ def _render_mirror_table(mirror_pairs: list):
     )
 
 
-def _render_signal_validation(state_df: pd.DataFrame):
-    """渲染信号验证 — 三级联动：状态/切换 → 行业 → 信号验证"""
-    st.subheader("交叉验证信号")
-    st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 信号验证")
-
-    _, mirror = get_models()
-
-    drill_states = _load_drill_states()
-    if drill_states is None or drill_states.empty:
-        st.warning("暂无板块数据")
-        return
-
-    # --- 第 1 级：选择筛选维度 ---
-    filter_mode = st.radio(
-        "筛选维度",
-        ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
-        horizontal=True,
-        key="mirror_signal_filter",
-    )
-
-    # --- 第 2 级：按状态/切换筛选 → 选行业 ---
-    if filter_mode.startswith("🎯"):
-        selected_state, matching_df = render_state_picker(drill_states, key="mirror_signal_state")
-    else:
-        selected_state, matching_df = render_transition_picker(drill_states, key="mirror_signal_transition")
-
-    if matching_df is None or matching_df.empty:
-        st.info("👆 请先选择筛选条件")
-        return
-
-    st.markdown("---")
-    # 信号验证只对极端状态有意义，提示用户
-    extreme_states = {"⑥弱转强", "④强转弱", "③加速冲顶", "⑦持续杀跌"}
-    if filter_mode.startswith("🎯") and selected_state and selected_state not in extreme_states:
-        st.info(f"💡 当前选择的状态「{selected_state}」不是极端信号状态。信号交叉验证对 ⑥弱转强、④强转弱、③加速冲顶、⑦持续杀跌 最有价值。")
-
-    selected_code, sector_label = render_sector_picker(
-        matching_df, label="选择行业进行信号验证", key="mirror_signal_sector"
-    )
-
-    if not selected_code:
-        return
-
-    # 获取板块信息
-    sector_info = drill_states[drill_states["sector_code"] == selected_code]
-    if sector_info.empty:
-        st.warning(f"未找到板块 {selected_code} 的数据")
-        return
-    sector_info = sector_info.iloc[0]
-
-    with st.spinner("验证中..."):
-        is_valid, mirror_code, confidence = mirror.validate_signal(
-            selected_code,
-            sector_info["state"],
-        )
-
-    if is_valid:
-        if mirror_code:
-            mirror_name = get_sector_name(mirror_code)
-            st.success(
-                f"验证通过: {sector_info['sector_name']}({sector_info['state']}) "
-                f"↔ {mirror_name}({get_opposite_state(sector_info['state'])}) "
-                f"置信度: {confidence:.1%}"
-            )
-        else:
-            st.success(
-                f"验证通过: {sector_info['sector_name']}({sector_info['state']}) "
-                f"- 非极端状态，无需交叉验证"
-            )
-    else:
-        st.error(
-            f"验证未通过: {sector_info['sector_name']}({sector_info['state']}) - "
-            f"未在关联组内找到镜像板块"
-        )
-
-
-def get_opposite_state(state: str) -> str:
-    """获取对立状态"""
-    opposite = {
-        "⑥弱转强": "④强转弱",
-        "④强转弱": "⑥弱转强",
-        "③加速冲顶": "⑦持续杀跌",
-        "⑦持续杀跌": "③加速冲顶",
-    }
-    return opposite.get(state, "")
-
-
 def render():
     """渲染镜像对监控页面"""
     st.title("镜像对监控")
@@ -252,7 +150,6 @@ def render():
 
     with st.spinner("加载镜像对数据..."):
         mirror_pairs = load_mirror_data()
-        state_df = load_state_for_mirror()
 
     # 统计概览
     st.subheader("概览")
@@ -317,11 +214,6 @@ def render():
                             f"({mp['strong_state']})"
                         )
                     st.divider()
-
-    # ================================================================
-    # 信号验证
-    # ================================================================
-    _render_signal_validation(state_df)
 
 
 if __name__ == "__main__":
