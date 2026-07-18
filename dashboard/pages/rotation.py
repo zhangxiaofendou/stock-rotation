@@ -1017,9 +1017,22 @@ def render():
                             "mom_pos": sr["rs_momentum_score"],
                         }
 
+            # —— 状态筛选（横向选择按钮，不用下拉）——
+            STATE_NAMES = ["①领涨减速", "②稳健上行", "③加速冲顶", "④强转弱",
+                           "⑤中性震荡", "⑥弱转强", "⑦持续杀跌", "⑧下跌中继", "⑨底背离"]
+            _all_states = ["全部"] + STATE_NAMES
+            sel_state = st.pills(
+                "选择状态（横向筛选，点击切换）", _all_states,
+                selection_mode="single", default="全部",
+            )
+            if sel_state and sel_state != "全部":
+                state_view = state_df[state_df["state"] == sel_state]
+            else:
+                state_view = state_df
+
             # 组装显示表
             rows = []
-            for _, r in state_df.iterrows():
+            for _, r in state_view.iterrows():
                 code = r["sector_code"]
                 badge = badge_map.get(code, 0)
                 sm = score_map.get(str(code))
@@ -1042,7 +1055,7 @@ def render():
             df["_o"] = df["九宫格状态"].str[1].map(STATE_ORD).fillna(9)
             df = df.sort_values("_o").drop(columns="_o").reset_index(drop=True)
 
-            st.subheader("全板块趋势对照（点击左侧行查看右侧K线）")
+            st.subheader(f"全板块趋势对照（{sel_state if sel_state and sel_state != '全部' else '全部状态'}，共 {len(df)} 个板块 · 点击左侧行查看右侧K线）")
             st.caption(SCORE_WEIGHT_NOTE)
 
             colL, colR = st.columns([0.95, 1.05])
@@ -1071,7 +1084,7 @@ def render():
                 )
                 st.dataframe(
                     styled,
-                    key="trend_table",
+                    key=f"trend_table_{sel_state}",
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="single-row",
