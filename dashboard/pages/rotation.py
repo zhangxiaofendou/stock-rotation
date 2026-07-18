@@ -589,7 +589,12 @@ def render():
     # ================================================================
     # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
     # ================================================================
-    with tab2:
+    def _render_detail_tab(state_df, score_df):
+        """板块详情（原独立页面迁入）。
+
+        抽成函数：原代码块内有多处 `return`，若直接写在 render() 的 `with tab2:`
+        里会提前退出整个 render()，导致后续 tab3/tab4 永不渲染。
+        """
         st.subheader("板块详情")
         st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 板块详情")
 
@@ -609,10 +614,11 @@ def render():
         )
 
         # --- 第 2 级：按状态/切换筛选 → 选行业 ---
+        # 注意：板块详情与个股下钻同页渲染，picker 默认 key 会冲突，需加 detail_ 前缀
         if filter_mode.startswith("🎯"):
-            _, matching_df = render_state_picker(drill_states)
+            _, matching_df = render_state_picker(drill_states, key="detail_state_picker")
         else:
-            _, matching_df = render_transition_picker(drill_states)
+            _, matching_df = render_transition_picker(drill_states, key="detail_transition_picker")
 
         if matching_df is None or matching_df.empty:
             st.info("👆 请先选择筛选条件")
@@ -620,7 +626,7 @@ def render():
 
         st.markdown("---")
         selected_code, sector_label = render_sector_picker(
-            matching_df, label="选择行业查看详情", key="rotation_tab3_sector"
+            matching_df, label="选择行业查看详情", key="detail_sector_picker"
         )
 
         if not selected_code:
@@ -712,6 +718,12 @@ def render():
                 )
                 display_series = display_series.sort_values("date", ascending=False)
                 st.dataframe(display_series, use_container_width=True, hide_index=True)
+
+    # ================================================================
+    # Tab 2 调用：必须在 _render_detail_tab 定义之后
+    # ================================================================
+    with tab2:
+        _render_detail_tab(state_df, score_df)
 
     # ================================================================
     # Tab 3: 趋势验证（板块趋势对照 + 250日K线）
