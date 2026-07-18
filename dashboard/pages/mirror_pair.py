@@ -16,7 +16,6 @@ from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.mirror_pair import MirrorPair
-from config.sector_map import SECTOR_GROUPS
 from dashboard.components.state_card import STATE_EMOJI
 
 
@@ -145,100 +144,76 @@ def _render_mirror_table(mirror_pairs: list):
     )
 
 
-@st.cache_data(ttl=86400)
-def load_state_for_mirror():
-    """加载板块状态（用于板块组信号平衡统计，独立缓存）"""
-    sm, _ = get_models()
-    return sm.calc_all_sectors_state()
-
-
-def _calc_group_signal_stats(state_df: pd.DataFrame) -> dict:
+def render_group_capital_path(mirror_pairs: list):
     """
-    按板块组(关联组)计算强弱信号平衡，复用市场温度计的口径：
-    - 买入信号：⑥弱转强、⑨底背离
-    - 卖出信号：①领涨减速、④强转弱、⑦持续杀跌
-    返回: {group_name: {"total", "buy_count", "sell_count"}}
+    板块组资金迁移路径：按板块组聚合镜像对，用 Sankey 展示各组内
+    资金从弱势子板块(④/⑦)向强势子板块(⑥/③)迁移的强度。
+    复用市场温度计的板块组(关联组)口径，红=资金流出、绿=资金流入。
     """
-    result = {}
-    if state_df is None or state_df.empty:
-        return result
-    for group_name, group_info in SECTOR_GROUPS.items():
-        group_codes = set(group_info["level2_codes"])
-        group_df = state_df[state_df["sector_code"].isin(group_codes)]
-        if len(group_df) > 0:
-            buy_states = group_df[group_df["state"].isin(["⑥弱转强", "⑨底背离"])]
-            sell_states = group_df[group_df["state"].isin(["①领涨减速", "④强转弱", "⑦持续杀跌"])]
-            result[group_name] = {
-                "total": len(group_df),
-                "buy_count": len(buy_states),
-                "sell_count": len(sell_states),
-            }
-    return result
-
-
-def _render_group_monitor(mirror_pairs: list):
-    """
-    板块组镜像对监控：把市场温度计的「板块组强弱」概念引入镜像对模块。
-    先给每个板块组一张强弱信号平衡表，再按板块组折叠展开各自的镜像对。
-    """
-    st.subheader("板块组镜像对监控")
-    st.caption("按板块组(关联组)维度监控资金镜像关系：组内强弱信号此消彼长，红为流出、绿为流入")
-
-    state_df = load_state_for_mirror()
-    group_stats = _calc_group_signal_stats(state_df)
-
-    # 组内镜像对归集
-    group_pairs = {}
-    for mp in mirror_pairs:
-        group_pairs.setdefault(mp["group"], []).append(mp)
-
-    if not group_stats:
-        st.warning("暂无板块组信号数据")
+    if not mirror_pairs:
+        st.info("暂无镜像对数据，无法生成板块组资金迁移路径")
         return
 
-    # 概览表：每个板块组的强弱信号平衡 + 组内镜像对数
-    table_rows = []
-    for g, s in group_stats.items():
-        n_pairs = len(group_pairs.get(g, []))
-        table_rows.append({
-            "板块组": g,
-            "板块数": s["total"],
-            "买入信号": s["buy_count"],
-            "卖出信号": s["sell_count"],
-            "买入占比": f"{s['buy_count'] / max(s['total'], 1):.1%}",
-            "卖出占比": f"{s['sell_count'] / max(s['total'], 1):.1%}",
-            "组内镜像对": n_pairs,
-        })
-    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+    # 按板块组聚合资金流强度（置信度合计，下限 0.1 保证连线可见）
+    group_flow = {}
+    for mp in mirror_pairs:
+        g = mp["group"]
+        group_flow[g] = group_flow.get(g, 0) + max(mp.get("confidence", 0.5), 0.1)
 
-    # 折叠展开：每个板块组内的镜像对
-    st.markdown("---")
-    for g in sorted(group_stats.keys(), key=lambda x: -len(group_pairs.get(x, []))):
-        s = group_stats[g]
-        pairs = group_pairs.get(g, [])
-        with st.expander(
-            f"{g} · 板块{s['total']}个 · 买{s['buy_count']}/卖{s['sell_count']} · 镜像对{len(pairs)}对",
-            expanded=False,
-        ):
-            if pairs:
-                for mp in pairs:
-                    c1, c2, c3 = st.columns([2, 1, 2])
-                    with c1:
-                        st.markdown(
-                            f"{STATE_EMOJI.get(mp['weak_state'], '')} **{mp['weak_name']}** "
-                            f"({mp['weak_state']})"
-                        )
-                    with c2:
-                        st.markdown(f"→ {mp['pair_type']} →")
-                        st.caption(f"置信度: {mp['confidence']:.1%}")
-                    with c3:
-                        st.markdown(
-                            f"{STATE_EMOJI.get(mp['strong_state'], '')} **{mp['strong_name']}** "
-                            f"({mp['strong_state']})"
-                        )
-                    st.divider()
-            else:
-                st.caption("该板块组当前无镜像对（组内未同时出现镜像状态组合）")
+    groups = list(group_flow.keys())
+    if not groups:
+        st.info("当前无板块组资金流数据")
+        return
+
+    # 节点：左侧 = 板块组(流出/弱势)，右侧 = 板块组(流入/强势)
+    node_labels = []
+    node_colors = []
+    node_map = {}
+    for g in groups:
+        out_label = f"{g}\n（流出）"
+        in_label = f"{g}\n（流入）"
+        node_map[("out", g)] = len(node_labels)
+        node_labels.append(out_label)
+        node_colors.append("#F44336")  # 红：资金流出
+        node_map[("in", g)] = len(node_labels)
+        node_labels.append(in_label)
+        node_colors.append("#4CAF50")  # 绿：资金流入
+
+    links_source, links_target, links_value = [], [], []
+    for g in groups:
+        links_source.append(node_map[("out", g)])
+        links_target.append(node_map[("in", g)])
+        links_value.append(group_flow[g])
+
+    fig = go.Figure(
+        go.Sankey(
+            textfont={"size": 16, "color": "black", "family": "Arial, sans-serif"},
+            node={
+                "pad": 18,
+                "thickness": 30,
+                "line": {"color": "gray", "width": 0.5},
+                "label": node_labels,
+                "color": node_colors,
+            },
+            link={
+                "source": links_source,
+                "target": links_target,
+                "value": links_value,
+                "color": ["rgba(255,152,0,0.35)"] * len(links_source),
+            },
+        )
+    )
+    fig.update_layout(
+        title=dict(
+            text="板块组资金迁移路径（组内：弱→强）",
+            font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
+        ),
+        height=400 + len(groups) * 60,
+        margin={"l": 10, "r": 10, "t": 50, "b": 10},
+        font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
+        paper_bgcolor="white",
+    )
+    st.plotly_chart(fig, use_container_width=True, key="group_capital_sankey")
 
 
 def render(show_header: bool = True):
@@ -280,11 +255,6 @@ def render(show_header: bool = True):
     )
     st.caption("展示资金从弱势板块(④/⑦)流向强势板块(⑥/③)的路径")
     _render_sankey(mirror_pairs)
-
-    # ================================================================
-    # 板块组镜像对监控
-    # ================================================================
-    _render_group_monitor(mirror_pairs)
 
 
 if __name__ == "__main__":

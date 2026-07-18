@@ -311,6 +311,24 @@ def _render_market_overview():
                 st.write(f"触发: {'是' if hs.get('triggered') else '否'}")
                 st.write(f"近5日跌幅: {hs.get('hs300_drop', 0):.2f}%")
 
+    # ================================================================
+    # 板块组资金迁移路径（最底部）
+    # ================================================================
+    st.subheader("板块组资金迁移路径")
+    st.caption("按板块组聚合镜像对，展示各组内资金从弱势子板块向强势子板块迁移的强度")
+
+    try:
+        from model.mirror_pair import MirrorPair
+        from dashboard.pages.mirror_pair import render_group_capital_path
+
+        _, sqlite_store = get_stores()
+        sm = get_state_machine()
+        mirror = MirrorPair(sqlite_store, sm)
+        pairs = mirror.find_mirror_pairs()
+        render_group_capital_path(pairs)
+    except Exception as e:
+        st.warning(f"板块组资金迁移路径加载失败：{e}")
+
 
 if __name__ == "__main__":
     render()
