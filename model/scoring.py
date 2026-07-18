@@ -183,6 +183,15 @@ class SectorScoring:
         """
         snapshot_path = self._get_score_snapshot_path()
 
+        # 彻底清理旧版本快照（v1），防止任何旧代码/旧部署读取缺列数据
+        v1_path = os.path.join(os.path.dirname(snapshot_path), "score_snapshot.parquet")
+        if os.path.exists(v1_path):
+            try:
+                os.remove(v1_path)
+                logger.info("删除旧版本评分快照 v1")
+            except OSError:
+                pass
+
         # 当日数据不变时直接用缓存（且必须是新口径快照）
         if date is None and os.path.exists(snapshot_path):
             import datetime
@@ -196,10 +205,15 @@ class SectorScoring:
                     return cached
                 else:
                     logger.info("检测到旧口径评分快照，删除并重新计算")
-                    try:
-                        os.remove(snapshot_path)
-                    except OSError:
-                        pass
+                    # 同时删除 v1 和 v2 文件名，避免任何旧格式残留
+                    cache_dir = os.path.dirname(snapshot_path)
+                    for fname in ["score_snapshot.parquet", "score_snapshot_v2.parquet"]:
+                        stale = os.path.join(cache_dir, fname)
+                        try:
+                            if os.path.exists(stale):
+                                os.remove(stale)
+                        except OSError:
+                            pass
 
         logger.info(f"计算所有板块评分（含横截面）, date={date or '最新'}")
 
