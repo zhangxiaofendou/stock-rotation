@@ -790,15 +790,20 @@ def render():
 
             # 综合评分明细映射（取自 score_df，含 4 维度 + 综合）
             score_map = {}
+            score_cols = ["score", "rs_cross_score", "mom_cross_score", "rs_position_score", "rs_momentum_score"]
             if score_df is not None and not score_df.empty:
-                for _, sr in score_df.iterrows():
-                    score_map[str(sr["sector_code"])] = {
-                        "score": sr["score"],
-                        "rs_cross": sr["rs_cross_score"],
-                        "mom_cross": sr["mom_cross_score"],
-                        "rs_pos": sr["rs_position_score"],
-                        "mom_pos": sr["rs_momentum_score"],
-                    }
+                missing = [c for c in score_cols if c not in score_df.columns]
+                if missing:
+                    st.warning(f"评分数据格式异常，缺少列 {missing}，请刷新页面或重新运行数据更新流程。评分列将显示为 N/A。")
+                else:
+                    for _, sr in score_df.iterrows():
+                        score_map[str(sr["sector_code"])] = {
+                            "score": sr["score"],
+                            "rs_cross": sr["rs_cross_score"],
+                            "mom_cross": sr["mom_cross_score"],
+                            "rs_pos": sr["rs_position_score"],
+                            "mom_pos": sr["rs_momentum_score"],
+                        }
 
             # 组装显示表
             rows = []

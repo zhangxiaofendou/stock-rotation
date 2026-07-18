@@ -190,12 +190,16 @@ class SectorScoring:
             today = datetime.datetime.now().date()
             if snapshot_mtime.date() == today:
                 cached = pd.read_parquet(snapshot_path)
-                # 列名校验：缺少横截面列说明是旧口径快照，丢弃重算
-                if all(c in cached.columns for c in ["rs_cross_score", "mom_cross_score"]):
+                # 列名校验：缺少 SCORE_COLUMNS 中任意列说明是旧口径快照，丢弃重算
+                if all(c in cached.columns for c in SCORE_COLUMNS):
                     logger.info("从评分快照缓存加载（新口径）")
                     return cached
                 else:
-                    logger.info("检测到旧口径评分快照，重新计算")
+                    logger.info("检测到旧口径评分快照，删除并重新计算")
+                    try:
+                        os.remove(snapshot_path)
+                    except OSError:
+                        pass
 
         logger.info(f"计算所有板块评分（含横截面）, date={date or '最新'}")
 
