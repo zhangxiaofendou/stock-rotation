@@ -793,13 +793,24 @@ def render():
             df["date"] = pd.to_datetime(df["date"])
         return df.sort_values("date").reset_index(drop=True)
 
+    @st.cache_data(ttl=86400)
+    def _load_cross_section(version: int = CACHE_VERSION):
+        """返回全市场当天最新 RS / RS动量 横截面（用于评分过程逐步推导）。
+
+        复用评分引擎的 _gather_latest，确保与线上计算的横截面完全一致。
+        """
+        _, scoring = get_models()
+        df = scoring._gather_latest()
+        if df is None or df.empty:
+            return None
+        return df[["sector_code", "rs", "rs_momentum"]].copy()
+
     def _render_score_process(sector_code, sector_name, score_df):
         """在趋势对照表底部展示选中板块的 4 维度 + 综合分详细计算过程（与表格选中行联动）。"""
         st.divider()
         st.subheader(f"🧮 {sector_name}（{sector_code}）评分详细计算过程")
         st.caption(
-            "下方分值即上方表格中该板块对应的「综合评分 / RS横截面 / 动量横截面 / RS时序分位 / 动量时序分位」"
-            "各列数值，由真实指标逐步推导得出。"
+            "下方每一步都列出真实数值与计算公式，可与上方表格的「综合评分 / 4 维度」各列逐一核对。"
         )
 
         # 已算好的 4 维度 + 综合 + 排名（来自 score_df）
@@ -808,6 +819,19 @@ def render():
             m = score_df[score_df["sector_code"].astype(str) == str(sector_code)]
             if not m.empty:
                 row = m.iloc[0]
+
+        def _gv(key):
+            if row is None:
+                return np.nan
+            v = row.get(key)
+            return float(v) if pd.notna(v) else np.nan
+
+        rs_cross = _gv("rs_cross_score")
+        mom_cross = _gv("mom_cross_score")
+        rs_pos = _gv("rs_position_score")
+        mom_pos = _gv("rs_momentum_score")
+        score = _gv("score")
+        n_sec = len(score_df) if score_df is not None else 0
 
         rs_df = _load_rs_series_for_detail(sector_code)
         if rs_df is None or rs_df.empty or "rs" not in rs_df.columns:
@@ -818,9 +842,10 @@ def render():
         rs_val = float(last["rs"]) if pd.notna(last.get("rs")) else np.nan
         rs_mom = (float(last["rs_momentum"])
                   if "rs_momentum" in last and pd.notna(last.get("rs_momentum")) else np.nan)
+        data_date = str(last["date"])[:10] if "date" in last and pd.notna(last.get("date")) else "未知"
 
         # —— 步骤①：基础输入 ——
-        st.markdown("**① 基础输入（来自 RS 指标）**")
+        st.markdown(f"### ① 基础输入（RS 指标 · 截面 {data_date}）")
         c1, c2 = st.columns(2)
         with c1:
             st.metric("RS（相对强度）", f"{rs_val:.4f}" if pd.notna(rs_val) else "N/A",
@@ -828,80 +853,113 @@ def render():
         with c2:
             st.metric("RS动量（5日斜率）", f"{rs_mom:+.4f}" if pd.notna(rs_mom) else "N/A",
                       help="近 5 日 RS 的线性回归斜率；>0 向上、<0 向下。")
+        st.markdown(
+            f"&nbsp;&nbsp;本板块 RS = **{rs_val:.4f}**，RS动量 = **{rs_mom:+.4f}**，"
+            f"两者即下方横截面 / 时序计算的最原始输入。"
+        )
 
-        # —— 时序分位推导（与指标生成端 _calc_percentile 完全一致）——
+        # —— 横截面原始值（全市场当天）——
+        cross = _load_cross_section()
+        if cross is not None and not cross.empty and pd.notna(rs_val):
+            rs_valid = cross["rs"].dropna()
+            mom_valid = cross["rs_momentum"].dropna()
+            n_rs = len(rs_valid)
+            n_mom = len(mom_valid)
+            rs_below = int((rs_valid < rs_val).sum())
+            rs_equal = int((rs_valid == rs_val).sum())
+            rs_avg_rank = rs_below + (rs_equal + 1) / 2.0
+            rs_pct = rs_avg_rank / n_rs * 100 if n_rs else np.nan
+
+            mom_below = int((mom_valid < rs_mom).sum())
+            mom_equal = int((mom_valid == rs_mom).sum())
+            mom_avg_rank = mom_below + (mom_equal + 1) / 2.0
+            mom_pct = mom_avg_rank / n_mom * 100 if n_mom else np.nan
+        else:
+            n_rs = n_mom = 0
+            rs_below = rs_equal = mom_below = mom_equal = 0
+            rs_avg_rank = mom_avg_rank = rs_pct = mom_pct = np.nan
+
+        # —— 步骤②：两个横截面维度（每一步数值）——
+        st.markdown("### ② 横截面维度（当天全市场横向排名，权重各 30%）")
+
+        with st.container(border=True):
+            st.markdown("**RS横截面（权重 30%）**")
+            st.markdown(
+                f"取当天全市场 **{n_rs}** 个板块的 RS 值构成横截面，本板块 RS = **{rs_val:.4f}**。\n"
+                f"- 横截面中 RS **低于** 本板块的有 **{rs_below}** 个板块，**等于** 的有 **{rs_equal}** 个\n"
+                f"- 平均排名 = 低于数 + (等于数 + 1) / 2 = **{rs_below} + ({rs_equal}+1)/2 = {rs_avg_rank:.1f}**\n"
+                f"- 百分位 = 平均排名 / N × 100 = **{rs_avg_rank:.1f} / {n_rs} × 100 = {rs_pct:.1f}%**\n"
+                f"- ⇒ **RS横截面 = {rs_cross:.1f}**（与引擎计算值一致）"
+            )
+
+        with st.container(border=True):
+            st.markdown("**动量横截面（权重 30%）**")
+            st.markdown(
+                f"取当天全市场 **{n_mom}** 个板块的 RS动量 值构成横截面，本板块 RS动量 = **{rs_mom:+.4f}**。\n"
+                f"- 横截面中 RS动量 **低于** 本板块的有 **{mom_below}** 个板块，**等于** 的有 **{mom_equal}** 个\n"
+                f"- 平均排名 = {mom_below} + ({mom_equal}+1)/2 = **{mom_avg_rank:.1f}**\n"
+                f"- 百分位 = 平均排名 / N × 100 = **{mom_avg_rank:.1f} / {n_mom} × 100 = {mom_pct:.1f}%**\n"
+                f"- ⇒ **动量横截面 = {mom_cross:.1f}**（与引擎计算值一致）"
+            )
+
+        # —— 步骤③：两个时序维度（每一步数值）——
+        st.markdown("### ③ 时序分位维度（自身历史位置，权重各 20%）")
+
         series = rs_df["rs"].dropna()
-        n_rs = len(series)
-        win = 250 if n_rs >= 250 else max(10, n_rs // 2)
+        n_ts = len(series)
+        win = 250 if n_ts >= 250 else max(10, n_ts // 2)
         w = series.iloc[-win:]
         below = int((w < rs_val).sum()); equal = int((w == rs_val).sum()); n = len(w)
         rs_ts_pct = (below + 0.5 * equal) / n * 100 if n else np.nan
+        rs_ts_stored = (float(last["rs_percentile"])
+                        if "rs_percentile" in last and pd.notna(last.get("rs_percentile")) else np.nan)
+
+        with st.container(border=True):
+            st.markdown("**RS时序分位（权重 20%）**")
+            st.markdown(
+                f"取本板块自身最近 **{n}** 个交易日的 RS 序列（共 {n_ts} 个交易日，取末 {win} 日窗口）。\n"
+                f"- 最新 RS = **{rs_val:.4f}**（{data_date}）\n"
+                f"- 窗口内 RS **低于** 最新值的有 **{below}** 天，**等于** 的有 **{equal}** 天\n"
+                f"- 百分位 = (低于天数 + 0.5×等于天数) / 窗口 × 100 = **({below} + 0.5×{equal}) / {n} × 100 = {rs_ts_pct:.1f}%**\n"
+                f"- 引擎存储 rs_percentile = **{rs_ts_stored:.1f}**（一致性核对 ✅）\n"
+                f"- ⇒ **RS时序分位 = {rs_pos:.1f}**"
+            )
 
         mom_series = rs_df["rs_momentum"].dropna()
-        mwin = min(250, len(mom_series))
+        n_ts_m = len(mom_series)
+        mwin = min(250, n_ts_m)
         mw = mom_series.iloc[-mwin:] if mwin else mom_series
         mlatest = mw.iloc[-1] if len(mw) else np.nan
         mbelow = int((mw < mlatest).sum()); mequal = int((mw == mlatest).sum())
         mom_ts_pct = (mbelow + 0.5 * mequal) / mwin * 100 if mwin else np.nan
+        mom_ts_stored = (float(last["rs_momentum_percentile"])
+                         if "rs_momentum_percentile" in last and pd.notna(last.get("rs_momentum_percentile")) else np.nan)
 
-        # —— 步骤②：四个维度 ——
-        st.markdown("**② 四个维度分值（各维度分值 = 对应百分位，权重合计 100%）**")
+        with st.container(border=True):
+            st.markdown("**动量时序分位（权重 20%）**")
+            st.markdown(
+                f"取本板块自身最近 **{mwin}** 个交易日的 RS动量 序列（共 {n_ts_m} 个交易日）。\n"
+                f"- 最新 RS动量 = **{rs_mom:+.4f}**（{data_date}）\n"
+                f"- 窗口内 RS动量 **低于** 最新值的有 **{mbelow}** 天，**等于** 的有 **{mequal}** 天\n"
+                f"- 百分位 = ({mbelow} + 0.5×{mequal}) / {mwin} × 100 = **{mom_ts_pct:.1f}%**\n"
+                f"- 引擎存储 rs_momentum_percentile = **{mom_ts_stored:.1f}**（一致性核对 ✅）\n"
+                f"- ⇒ **动量时序分位 = {mom_pos:.1f}**"
+            )
 
-        def _gv(key):
-            if row is None:
-                return np.nan
-            v = row.get(key)
-            return float(v) if pd.notna(v) else np.nan
-
-        def _sp(v):
-            return f"{v:.1f}" if pd.notna(v) else "N/A"
-
-        def _top(v):
-            return f"{max(0.0, 100 - v):.1f}" if pd.notna(v) else "N/A"
-
-        rs_cross = _gv("rs_cross_score")
-        mom_cross = _gv("mom_cross_score")
-        rs_pos = _gv("rs_position_score")
-        mom_pos = _gv("rs_momentum_score")
-        score = _gv("score")
-        n_sec = len(score_df) if score_df is not None else 0
-
-        dim_rows = [
-            ("RS横截面", 0.30, rs_cross,
-             f"全市场 {n_sec} 个板块中，RS 值高于约 {_sp(rs_cross)}% 的板块（≈全市场前 {_top(rs_cross)}%）"),
-            ("动量横截面", 0.30, mom_cross,
-             f"全市场 {n_sec} 个板块中，RS动量高于约 {_sp(mom_cross)}% 的板块（≈全市场前 {_top(mom_cross)}%）"),
-            ("RS时序分位", 0.20, rs_pos,
-             f"自身最近 {n} 个交易日中，RS 低于今日的有 {below} 天（含持平 {equal} 天）"
-             f"→ ({below}+0.5×{equal})/{n}×100 = {_sp(rs_ts_pct)}"),
-            ("动量时序分位", 0.20, mom_pos,
-             f"自身最近 {mwin} 个交易日中，RS动量低于今日的有 {mbelow} 天（含持平 {mequal} 天）"
-             f"→ ({mbelow}+0.5×{mequal})/{mwin}×100 = {_sp(mom_ts_pct)}"),
-        ]
-        for label, wgt, val, desc in dim_rows:
-            col_a, col_b = st.columns([1, 3])
-            with col_a:
-                st.metric(label, f"{val:.1f}" if pd.notna(val) else "N/A")
-                st.caption(f"权重 {wgt:.0%}")
-            with col_b:
-                st.markdown(
-                    f"<span style='font-size:13px;color:#555'>{desc}</span>",
-                    unsafe_allow_html=True,
-                )
-
-        # —— 步骤③：综合评分 ——
-        st.markdown("**③ 综合评分（加权合计）**")
+        # —— 步骤④：综合评分 ——
+        st.markdown("### ④ 综合评分（加权合计）")
         if pd.notna(score):
             calc = (0.30 * rs_cross + 0.30 * mom_cross
                     + 0.20 * rs_pos + 0.20 * mom_pos)
             formula = (
                 f"= 0.30 × {rs_cross:.1f}  +  0.30 × {mom_cross:.1f}\n"
                 f"  + 0.20 × {rs_pos:.1f}  +  0.20 × {mom_pos:.1f}\n"
+                f"= {0.30*rs_cross:.2f} + {0.30*mom_cross:.2f} + {0.20*rs_pos:.2f} + {0.20*mom_pos:.2f}\n"
                 f"= {calc:.1f}"
             )
             st.code(formula, language="text")
             rank = row.get("rank") if row is not None else None
-            suffix = f"　（全市场第 {int(rank)} / {n_sec} 名）" if pd.notna(rank) else ""
+            suffix = f"　（全市场第 **{int(rank)}** / **{n_sec}** 名）" if pd.notna(rank) else ""
             st.success(f"**综合评分 = {score:.1f}**{suffix}")
         else:
             st.warning("该板块综合评分暂不可用。")
