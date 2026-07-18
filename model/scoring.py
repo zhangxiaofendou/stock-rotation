@@ -1,14 +1,19 @@
 """
 板块综合评分（0-100）
 ====================
-多维度加权评分，综合RS、趋势、拥挤度、资金流等指标。
+基于 RS（相对强度）的多维度加权评分，核心引入「横截面」维度。
 
-评分维度：
-  - RS分位（位置）权重25%：当前RS在历史中的位置
-  - RS动量分位（方向）权重25%：RS的变化方向
-  - 价格趋势权重20%：绝对价格趋势方向
-  - 拥挤度权重15%：反向指标，拥挤度高扣分
-  - 资金流权重15%：资金流方向
+评分维度（加权合计 100%）：
+  - RS横截面      30%：当天全市场 RS 排名分位（横向选强）
+  - 动量横截面    30%：当天全市场 RS动量 排名分位（横向选加速者）
+  - RS时序分位    20%：RS 在自身历史中的位置（过滤绝对弱势）
+  - 动量时序分位  20%：RS动量 在自身历史中的位置（确认方向）
+
+设计原则：
+  - 横截面为主（60%）：轮动的本质是横向比较，必须看「今天全市场里谁最强」。
+  - 时序为辅（40%）：自身历史位置用于过滤与确认，避免把「最强里的矮子」选进来。
+  - 趋势/拥挤度/资金流不计入评分：趋势与 RS 高度重叠；拥挤度改为风险提示
+    角标（追强不该因拥挤就压分）；资金流暂未接入批量数据（恒为中性）。
 """
 
 from typing import Optional, List, Dict
@@ -20,6 +25,21 @@ from config.logger import get_logger
 from config.settings import PARQUET_DIR
 
 logger = get_logger(__name__)
+
+# 综合评分权重（合计 = 1.0）
+WEIGHTS = {
+    "rs_cross": 0.30,       # RS横截面
+    "mom_cross": 0.30,      # 动量横截面
+    "rs_position": 0.20,    # RS时序分位
+    "mom_position": 0.20,   # 动量时序分位
+}
+
+# 评分结果列（同时作为旧缓存兼容性判据：缺这些列即视为旧快照）
+SCORE_COLUMNS = [
+    "sector_code", "sector_name", "score", "state", "rank",
+    "rs_position_score", "rs_momentum_score", "rs_cross_score",
+    "mom_cross_score", "crowding_score",
+]
 
 
 class SectorScoring:
@@ -43,7 +63,6 @@ class SectorScoring:
     # ============================================================
     def _load_rs_data(self, sector_code: str) -> Optional[pd.DataFrame]:
         """加载RS指标数据"""
-        import os
         rs_dir = os.path.join(str(PARQUET_DIR), "indicators", "rs")
         safe_code = sector_code.replace(".", "_")
         rs_path = os.path.join(rs_dir, f"{safe_code}.parquet")
@@ -56,7 +75,6 @@ class SectorScoring:
 
     def _load_trend_data(self, sector_code: str) -> Optional[pd.DataFrame]:
         """加载趋势数据"""
-        import os
         trend_dir = os.path.join(str(PARQUET_DIR), "indicators", "trend")
         safe_code = sector_code.replace(".", "_")
         trend_path = os.path.join(trend_dir, f"{safe_code}.parquet")
@@ -69,7 +87,6 @@ class SectorScoring:
 
     def _load_crowding_data(self, sector_code: str) -> Optional[pd.DataFrame]:
         """加载拥挤度数据"""
-        import os
         crowd_dir = os.path.join(str(PARQUET_DIR), "indicators", "crowding")
         safe_code = sector_code.replace(".", "_")
         crowd_path = os.path.join(crowd_dir, f"{safe_code}.parquet")
@@ -80,223 +97,71 @@ class SectorScoring:
             df["date"] = pd.to_datetime(df["date"])
         return df.sort_values("date").reset_index(drop=True)
 
-    def _get_latest_row(self, df: pd.DataFrame, date: str = None):
-        """获取DataFrame最新行"""
-        if df is None or df.empty:
+    # ============================================================
+    # 批量评分（主路径，含横截面）
+    # ============================================================
+    def _safe_float(self, val, default=np.nan):
+        """安全转 float，缺失/NaN 返回 default"""
+        try:
+            if val is None or (isinstance(val, float) and np.isnan(val)):
+                return default
+            return float(val)
+        except (TypeError, ValueError):
+            return default
+
+    def _gather_latest(self, date: str = None) -> Optional[pd.DataFrame]:
+        """
+        汇总所有板块的最新一行指标，返回一个 DataFrame。
+
+        列：sector_code, rs, rs_percentile, rs_momentum, rs_momentum_percentile,
+            trend, crowding_score
+        """
+        rs_dir = os.path.join(str(PARQUET_DIR), "indicators", "rs")
+        if not os.path.exists(rs_dir):
+            logger.error(f"RS指标目录不存在: {rs_dir}")
             return None
-        if date is not None:
-            target = pd.to_datetime(date)
-            rows = df[df["date"] == target]
-            if not rows.empty:
-                return rows.iloc[-1]
-        return df.iloc[-1]
 
-    # ============================================================
-    # 各维度评分
-    # ============================================================
-    def _score_rs_position(self, rs_percentile: float) -> float:
-        """
-        RS分位评分（0-100）
-        高位=强势，但>90扣分（过强可能回调）
+        rows = []
+        for f in os.listdir(rs_dir):
+            if not f.endswith(".parquet"):
+                continue
+            code = f.replace(".parquet", "").replace("_", ".", 1)
+            if not code.endswith(".SI"):
+                code = code.replace("_SI", ".SI")
 
-        参数:
-            rs_percentile: RS分位数 (0-100)
+            rs_df = self._load_rs_data(code)
+            if rs_df is None or rs_df.empty:
+                continue
+            rs_row = rs_df.iloc[-1]
 
-        返回:
-            评分 (0-100)
-        """
-        if rs_percentile is None or np.isnan(rs_percentile):
-            return 50.0  # 缺失默认中性
-
-        # 基础分 = RS分位本身
-        score = rs_percentile
-
-        # >90% 过强，小幅扣分
-        if rs_percentile > 90:
-            score = 90 - (rs_percentile - 90) * 0.5
-        # <10% 过弱，不再额外加分
-        elif rs_percentile < 10:
-            score = rs_percentile
-
-        return max(0, min(100, score))
-
-    def _score_rs_momentum(self, rs_momentum_percentile: float) -> float:
-        """
-        RS动量分位评分（0-100）
-        动量增强=高分，减弱=低分
-
-        参数:
-            rs_momentum_percentile: RS动量分位数 (0-100)
-
-        返回:
-            评分 (0-100)
-        """
-        if rs_momentum_percentile is None or np.isnan(rs_momentum_percentile):
-            return 50.0
-
-        return rs_momentum_percentile
-
-    def _score_trend(self, trend: str) -> float:
-        """
-        价格趋势评分（0-100）
-        上涨=高分，下跌=低分
-
-        参数:
-            trend: "上涨"/"横盘"/"下跌"
-
-        返回:
-            评分 (0-100)
-        """
-        trend_scores = {
-            "上涨": 80,
-            "横盘": 50,
-            "下跌": 20,
-        }
-        return trend_scores.get(trend, 50)
-
-    def _score_crowding(self, crowding_score: float) -> float:
-        """
-        拥挤度评分（0-100，反向指标）
-        拥挤度高=低分（过热风险），拥挤度低=高分（安全）
-
-        参数:
-            crowding_score: 拥挤度 (0-100)
-
-        返回:
-            评分 (0-100)
-        """
-        if crowding_score is None or np.isnan(crowding_score):
-            return 50.0
-
-        # 反向：拥挤度越高，评分越低
-        # 拥挤度>80 = 极度拥挤 → 低分
-        # 拥挤度<20 = 冷清 → 高分
-        if crowding_score > 80:
-            score = 100 - crowding_score  # 80拥挤 → 20分
-        elif crowding_score < 20:
-            score = 100 - crowding_score  # 10拥挤 → 90分
-        else:
-            score = 100 - crowding_score  # 线性反向
-
-        return max(0, min(100, score))
-
-    def _score_fund_flow(self, fund_flow_signal: Optional[str] = None) -> float:
-        """
-        资金流评分（0-100）
-
-        参数:
-            fund_flow_signal: "正向"/"中性"/"反向"
-
-        返回:
-            评分 (0-100)
-        """
-        flow_scores = {
-            "正向": 80,
-            "中性": 50,
-            "反向": 20,
-        }
-        return flow_scores.get(fund_flow_signal, 50)
-
-    # ============================================================
-    # 综合评分
-    # ============================================================
-    def calc_score(
-        self,
-        sector_code: str,
-        date: str = None,
-        fund_flow_signal: Optional[str] = None,
-    ) -> Optional[Dict]:
-        """
-        计算单个板块综合评分
-
-        参数:
-            sector_code: 板块代码
-            date: 目标日期，None表示最新
-            fund_flow_signal: 资金流信号（可选，由外部提供）
-
-        返回:
-            dict: {
-                'sector_code': 板块代码,
-                'score': 综合评分 (0-100),
-                'rs_position_score': RS分位得分,
-                'rs_momentum_score': RS动量得分,
-                'trend_score': 趋势得分,
-                'crowding_score': 拥挤度得分,
-                'fund_flow_score': 资金流得分,
-                'state': 九宫格状态,
+            rec = {
+                "sector_code": code,
+                "rs": self._safe_float(rs_row["rs"]) if "rs" in rs_row else np.nan,
+                "rs_percentile": self._safe_float(rs_row["rs_percentile"]) if "rs_percentile" in rs_row else np.nan,
+                "rs_momentum": self._safe_float(rs_row["rs_momentum"]) if "rs_momentum" in rs_row else np.nan,
+                "rs_momentum_percentile": self._safe_float(rs_row["rs_momentum_percentile"]) if "rs_momentum_percentile" in rs_row else np.nan,
+                "trend": "横盘",
+                "crowding_score": np.nan,
             }
-        """
-        logger.info(f"计算板块综合评分: {sector_code}")
 
-        # 加载各维度数据
-        rs_df = self._load_rs_data(sector_code)
-        trend_df = self._load_trend_data(sector_code)
-        crowd_df = self._load_crowding_data(sector_code)
+            # 趋势（用于九宫格状态判定）
+            trend_df = self._load_trend_data(code)
+            if trend_df is not None and not trend_df.empty and "trend" in trend_df.columns:
+                rec["trend"] = trend_df.iloc[-1]["trend"]
 
-        if rs_df is None:
-            logger.warning(f"板块 {sector_code} RS数据不存在，无法评分")
+            # 拥挤度（移出评分，保留为风险提示列）
+            crowd_df = self._load_crowding_data(code)
+            if crowd_df is not None and not crowd_df.empty and "crowding_score" in crowd_df.columns:
+                rec["crowding_score"] = self._safe_float(crowd_df.iloc[-1]["crowding_score"])
+
+            rows.append(rec)
+
+        if not rows:
+            logger.error("未找到任何板块数据")
             return None
 
-        # 获取最新行数据
-        rs_row = self._get_latest_row(rs_df, date)
-        trend_row = self._get_latest_row(trend_df, date)
-        crowd_row = self._get_latest_row(crowd_df, date)
+        return pd.DataFrame(rows)
 
-        # 提取各维度值
-        rs_percentile = rs_row["rs_percentile"] if rs_row is not None and "rs_percentile" in rs_row.index else None
-        rs_momentum_pct = rs_row["rs_momentum_percentile"] if rs_row is not None and "rs_momentum_percentile" in rs_row.index else None
-        trend = trend_row["trend"] if trend_row is not None and "trend" in trend_row.index else "横盘"
-        crowding = crowd_row["crowding_score"] if crowd_row is not None and "crowding_score" in crowd_row.index else None
-
-        # 各维度评分
-        rs_pos = self._score_rs_position(rs_percentile)
-        rs_mom = self._score_rs_momentum(rs_momentum_pct)
-        trend_s = self._score_trend(trend)
-        crowd_s = self._score_crowding(crowding)
-        flow_s = self._score_fund_flow(fund_flow_signal)
-
-        # 加权综合评分
-        weights = {
-            "rs_position": 0.25,
-            "rs_momentum": 0.25,
-            "trend": 0.20,
-            "crowding": 0.15,
-            "fund_flow": 0.15,
-        }
-        total_score = (
-            rs_pos * weights["rs_position"]
-            + rs_mom * weights["rs_momentum"]
-            + trend_s * weights["trend"]
-            + crowd_s * weights["crowding"]
-            + flow_s * weights["fund_flow"]
-        )
-
-        # 获取九宫格状态
-        state = None
-        if self.state_machine is not None and trend is not None and rs_momentum_pct is not None:
-            state = self.state_machine.determine_state(trend, rs_momentum_pct)
-
-        result = {
-            "sector_code": sector_code,
-            "score": round(total_score, 1),
-            "rs_position_score": round(rs_pos, 1),
-            "rs_momentum_score": round(rs_mom, 1),
-            "trend_score": round(trend_s, 1),
-            "crowding_score": round(crowd_s, 1),
-            "fund_flow_score": round(flow_s, 1),
-            "state": state,
-        }
-
-        logger.info(
-            f"板块 {sector_code} 综合评分={total_score:.1f} "
-            f"(RS位置={rs_pos:.1f}, RS动量={rs_mom:.1f}, "
-            f"趋势={trend_s:.1f}, 拥挤={crowd_s:.1f}, 资金={flow_s:.1f})"
-        )
-        return result
-
-    # ============================================================
-    # 批量评分
-    # ============================================================
     def _get_score_snapshot_path(self) -> str:
         """获取评分快照文件路径"""
         cache_dir = os.path.join(str(PARQUET_DIR), "cache")
@@ -306,83 +171,100 @@ class SectorScoring:
         """
         计算所有板块评分并排序（带快照缓存）
 
+        评分公式（横截面为主、时序为辅）：
+            score = 0.30·RS横截面 + 0.30·动量横截面
+                  + 0.20·RS时序分位 + 0.20·动量时序分位
+
         参数:
-            date: 目标日期
+            date: 目标日期（None=最新）
 
         返回:
-            DataFrame: sector_code, sector_name, score, state, rank
+            DataFrame: 见 SCORE_COLUMNS
         """
         snapshot_path = self._get_score_snapshot_path()
 
-        # 当日数据不变时直接用缓存
+        # 当日数据不变时直接用缓存（且必须是新口径快照）
         if date is None and os.path.exists(snapshot_path):
             import datetime
             snapshot_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(snapshot_path))
             today = datetime.datetime.now().date()
-            # 快照是今天生成的 → 直接返回
             if snapshot_mtime.date() == today:
-                logger.info("从评分快照缓存加载")
-                return pd.read_parquet(snapshot_path)
+                cached = pd.read_parquet(snapshot_path)
+                # 列名校验：缺少横截面列说明是旧口径快照，丢弃重算
+                if all(c in cached.columns for c in ["rs_cross_score", "mom_cross_score"]):
+                    logger.info("从评分快照缓存加载（新口径）")
+                    return cached
+                else:
+                    logger.info("检测到旧口径评分快照，重新计算")
 
-        logger.info(f"计算所有板块评分, date={date or '最新'}")
+        logger.info(f"计算所有板块评分（含横截面）, date={date or '最新'}")
 
-        # 获取所有板块代码
-        rs_dir = os.path.join(str(PARQUET_DIR), "indicators", "rs")
-        if not os.path.exists(rs_dir):
-            logger.error(f"RS指标目录不存在: {rs_dir}")
+        df = self._gather_latest(date)
+        if df is None or df.empty:
             return None
 
-        sector_codes = []
-        for f in os.listdir(rs_dir):
-            if f.endswith(".parquet"):
-                code = f.replace(".parquet", "").replace("_", ".", 1)
-                if not code.endswith(".SI"):
-                    code = code.replace("_SI", ".SI")
-                sector_codes.append(code)
+        # ---- 横截面：当天全市场排名分位 ----
+        df["rs_cross"] = df["rs"].rank(pct=True) * 100
+        df["mom_cross"] = df["rs_momentum"].rank(pct=True) * 100
 
-        if not sector_codes:
-            logger.error("未找到任何板块数据")
-            return None
+        # ---- 四个组件（裁剪到 0-100，缺失填中性 50）----
+        rs_pos = df["rs_percentile"].clip(0, 100).fillna(50)
+        rs_mom = df["rs_momentum_percentile"].clip(0, 100).fillna(50)
+        rs_cross = df["rs_cross"].clip(0, 100).fillna(50)
+        mom_cross = df["mom_cross"].clip(0, 100).fillna(50)
 
-        results = []
-        for code in sector_codes:
+        # ---- 综合评分（加权合计 100%）----
+        df["score"] = (
+            WEIGHTS["rs_cross"] * rs_cross
+            + WEIGHTS["mom_cross"] * mom_cross
+            + WEIGHTS["rs_position"] * rs_pos
+            + WEIGHTS["mom_position"] * rs_mom
+        ).round(1)
+
+        # 组件分（透传，便于核对/后续展示）
+        df["rs_position_score"] = rs_pos.round(1)
+        df["rs_momentum_score"] = rs_mom.round(1)
+        df["rs_cross_score"] = rs_cross.round(1)
+        df["mom_cross_score"] = mom_cross.round(1)
+        df["crowding_score"] = df["crowding_score"].clip(0, 100).fillna(50).round(1)
+
+        # ---- 九宫格状态（依赖 trend + 动量时序分位）----
+        if self.state_machine is not None:
             try:
-                score_info = self.calc_score(code, date=date)
-                if score_info is None:
-                    continue
-
-                # 获取板块名称
-                sector_name = code
-                if self.sqlite_store is not None:
-                    try:
-                        sector_info = self.sqlite_store.get_sector_by_code(code)
-                        if sector_info:
-                            sector_name = sector_info.get("name", code)
-                    except Exception:
-                        pass
-
-                results.append({
-                    "sector_code": code,
-                    "sector_name": sector_name,
-                    "score": score_info["score"],
-                    "state": score_info.get("state"),
-                    "rs_position_score": score_info["rs_position_score"],
-                    "rs_momentum_score": score_info["rs_momentum_score"],
-                    "trend_score": score_info["trend_score"],
-                    "crowding_score": score_info["crowding_score"],
-                    "fund_flow_score": score_info["fund_flow_score"],
-                })
+                def _state(r):
+                    mom = r["rs_momentum_percentile"]
+                    if mom is None or (isinstance(mom, float) and np.isnan(mom)):
+                        mom = 50
+                    return self.state_machine.determine_state(r["trend"], mom)
+                df["state"] = df.apply(_state, axis=1)
             except Exception as e:
-                logger.error(f"计算板块 {code} 评分异常: {e}")
+                logger.error(f"状态判定异常: {e}")
+                df["state"] = None
+        else:
+            df["state"] = None
 
-        if not results:
-            return None
+        # ---- 板块名称 ----
+        if self.sqlite_store is not None:
+            names = {}
+            for code in df["sector_code"].unique():
+                try:
+                    info = self.sqlite_store.get_sector_by_code(code)
+                    if info:
+                        names[code] = info.get("name", code)
+                except Exception:
+                    pass
+            df["sector_name"] = df["sector_code"].map(names).fillna(df["sector_code"])
+        else:
+            df["sector_name"] = df["sector_code"]
 
-        df = pd.DataFrame(results)
+        # ---- 排序 + 排名 ----
         df = df.sort_values("score", ascending=False).reset_index(drop=True)
         df["rank"] = df.index + 1
 
-        # 保存快照（仅完整无date参数时）
+        # 仅保留对外列
+        df = df[SCORE_COLUMNS]
+
+        # 保存快照（仅完整无 date 参数时）
         if date is None:
             os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
             df.to_parquet(snapshot_path, index=False)
