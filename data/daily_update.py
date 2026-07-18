@@ -39,13 +39,12 @@ logger = get_logger(__name__)
 # 快照缓存路径
 SNAPSHOT_DIR = PROJECT_ROOT / "data" / "storage" / "parquet" / "cache"
 STATE_SNAPSHOT = SNAPSHOT_DIR / "state_snapshot.parquet"
-SCORE_SNAPSHOT = SNAPSHOT_DIR / "score_snapshot_v2.parquet"
 
 
 def invalidate_snapshots():
     """清除快照缓存，让 Dashboard 下次加载时重新计算"""
     deleted = []
-    for snap in [STATE_SNAPSHOT, SCORE_SNAPSHOT]:
+    for snap in [STATE_SNAPSHOT]:
         if snap.exists():
             snap.unlink()
             deleted.append(snap.name)

@@ -109,38 +109,11 @@ def load_state_df():
     return sm.calc_all_sectors_state()
 
 
+@st.cache_data(ttl=3600)  # 评分每日更新一次，1h 内存缓存避免重复实时计算
 def load_score_df():
-    """加载板块评分排行（带列完整性兜底）"""
+    """加载板块评分排行（实时计算，不再依赖任何磁盘快照文件）"""
     _, scoring = get_models()
-    score_df = scoring.calc_all_scores()
-
-    # 兜底：若旧格式快照导致缺少 4 维度列，删除所有可能的旧快照并强制重算
-    required = ["score", "rs_cross_score", "mom_cross_score", "rs_position_score", "rs_momentum_score"]
-    if score_df is not None and not score_df.empty:
-        missing = [c for c in required if c not in score_df.columns]
-        if missing:
-            st.warning(f"检测到评分快照格式旧/损坏（缺 {missing}），正在强制重新计算...")
-            cache_dir = os.path.join("data", "storage", "parquet", "cache")
-            # 同时清理 v1 和 v2 两种文件名，防止任何旧格式残留干扰
-            for fname in ["score_snapshot.parquet", "score_snapshot_v2.parquet"]:
-                fpath = os.path.join(cache_dir, fname)
-                try:
-                    if os.path.exists(fpath):
-                        os.remove(fpath)
-                except OSError:
-                    pass
-            # 清除 Streamlit 数据缓存，确保重算不走任何缓存
-            st.cache_data.clear()
-            score_df = scoring.calc_all_scores()
-            # 二次检查：若仍缺列，说明数据损坏无法自动恢复
-            still_missing = [c for c in required if score_df is None or c not in score_df.columns]
-            if still_missing:
-                st.error(
-                    f"评分数据无法自动恢复，仍缺少列：{still_missing}。"
-                    f"请手动删除 {cache_dir}/score_snapshot*.parquet 后刷新页面，或重新运行数据更新流程。"
-                )
-                return None
-    return score_df
+    return scoring.calc_all_scores()
 
 
 @st.cache_data(ttl=3600)

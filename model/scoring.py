@@ -162,14 +162,9 @@ class SectorScoring:
 
         return pd.DataFrame(rows)
 
-    def _get_score_snapshot_path(self) -> str:
-        """获取评分快照文件路径（使用 v2 文件名，避免旧格式快照被误读）"""
-        cache_dir = os.path.join(str(PARQUET_DIR), "cache")
-        return os.path.join(cache_dir, "score_snapshot_v2.parquet")
-
     def calc_all_scores(self, date: str = None) -> Optional[pd.DataFrame]:
         """
-        计算所有板块评分并排序（带快照缓存）
+        实时计算所有板块评分并排序（无磁盘快照，每次调用即时计算）。
 
         评分公式（横截面为主、时序为辅）：
             score = 0.30·RS横截面 + 0.30·动量横截面
@@ -179,43 +174,21 @@ class SectorScoring:
             date: 目标日期（None=最新）
 
         返回:
-            DataFrame: 见 SCORE_COLUMNS
+            DataFrame: 见 SCORE_COLUMNS（始终含全部 10 列，数据缺失处以中性值填充）
         """
-        snapshot_path = self._get_score_snapshot_path()
-
-        # 彻底清理旧版本快照（v1），防止任何旧代码/旧部署读取缺列数据
-        v1_path = os.path.join(os.path.dirname(snapshot_path), "score_snapshot.parquet")
-        if os.path.exists(v1_path):
+        # 清理任何历史遗留的评分快照文件：本系统已改为实时计算，不再读写磁盘快照。
+        # 这一行确保云端/本地残留的旧 score_snapshot*.parquet 被彻底清除，不留后患。
+        _cache_dir = os.path.join(str(PARQUET_DIR), "cache")
+        for _f in ["score_snapshot.parquet", "score_snapshot_v2.parquet"]:
+            _p = os.path.join(_cache_dir, _f)
             try:
-                os.remove(v1_path)
-                logger.info("删除旧版本评分快照 v1")
+                if os.path.exists(_p):
+                    os.remove(_p)
+                    logger.info(f"清理历史评分快照: {_p}")
             except OSError:
                 pass
 
-        # 当日数据不变时直接用缓存（且必须是新口径快照）
-        if date is None and os.path.exists(snapshot_path):
-            import datetime
-            snapshot_mtime = datetime.datetime.fromtimestamp(os.path.getmtime(snapshot_path))
-            today = datetime.datetime.now().date()
-            if snapshot_mtime.date() == today:
-                cached = pd.read_parquet(snapshot_path)
-                # 列名校验：缺少 SCORE_COLUMNS 中任意列说明是旧口径快照，丢弃重算
-                if all(c in cached.columns for c in SCORE_COLUMNS):
-                    logger.info("从评分快照缓存加载（新口径）")
-                    return cached
-                else:
-                    logger.info("检测到旧口径评分快照，删除并重新计算")
-                    # 同时删除 v1 和 v2 文件名，避免任何旧格式残留
-                    cache_dir = os.path.dirname(snapshot_path)
-                    for fname in ["score_snapshot.parquet", "score_snapshot_v2.parquet"]:
-                        stale = os.path.join(cache_dir, fname)
-                        try:
-                            if os.path.exists(stale):
-                                os.remove(stale)
-                        except OSError:
-                            pass
-
-        logger.info(f"计算所有板块评分（含横截面）, date={date or '最新'}")
+        logger.info(f"实时计算所有板块评分（含横截面）, date={date or '最新'}")
 
         df = self._gather_latest(date)
         if df is None or df.empty:
@@ -279,14 +252,8 @@ class SectorScoring:
         df = df.sort_values("score", ascending=False).reset_index(drop=True)
         df["rank"] = df.index + 1
 
-        # 仅保留对外列
+        # 仅保留对外列（始终为完整的 SCORE_COLUMNS，实时计算不依赖磁盘快照）
         df = df[SCORE_COLUMNS]
-
-        # 保存快照（仅完整无 date 参数时）
-        if date is None:
-            os.makedirs(os.path.dirname(snapshot_path), exist_ok=True)
-            df.to_parquet(snapshot_path, index=False)
-            logger.info(f"评分快照已保存: {snapshot_path}")
 
         logger.info(f"所有板块评分计算完成, 共 {len(df)} 个板块")
         return df
