@@ -274,7 +274,10 @@ def render():
     # ================================================================
     # 资金迁移网络图
     # ================================================================
-    st.subheader("资金迁移路径")
+    st.markdown(
+        '<span style="color:#000000;font-weight:normal;font-size:1.25rem;">资金迁移路径</span>',
+        unsafe_allow_html=True,
+    )
     st.caption("展示资金从弱势板块(④/⑦)流向强势板块(⑥/③)的路径")
     _render_sankey(mirror_pairs)
 
