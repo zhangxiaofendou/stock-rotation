@@ -321,7 +321,7 @@ def render_group_capital_path(state_df: pd.DataFrame):
     st.plotly_chart(fig, use_container_width=True, key="group_capital_sankey")
 
     st.caption(
-        "浅红=净流出行业、深红=净流出板块组；深绿=净流入板块组、浅绿=净流入行业；"
+        "四层结构：左/浅红=流出行业，左中/深红=净流出板块组，右中/深绿=净流入板块组，右/浅绿=流入行业；"
         "「其他N行业」= 该板块组内资金流其余行业的合计。连线粗细代表迁移强度。"
     )
 
