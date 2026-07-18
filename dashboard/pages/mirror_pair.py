@@ -161,18 +161,21 @@ _STATE_FLOW_WEIGHT = {
 
 def render_group_capital_path(state_df: pd.DataFrame):
     """
-    板块组之间的资金迁移路径（跨组）：
-    用各板块组的「净资金流」推导组间迁移——左侧红点=净流出板块组(弱势)，
-    右侧绿点=净流入板块组(强势)，连线粗细表示资金从弱组迁往强组的强度
-    （按 组间强弱乘积 成比例分配，总流入=总流出）。
+    板块组之间的资金迁移路径（跨组，含具体行业）：
+    四层 Sankey —— 流出行业 → 净流出板块组 → 净流入板块组 → 流入行业。
     净资金流 = Σ 组内各板块状态的资金权重（见 _STATE_FLOW_WEIGHT）。
+    每个板块组只展开资金流最强的 Top N 行业，其余行业合并为「其他N行业」节点
+    （保证流量守恒、又不至于拥挤）。
     """
+    TOP_N = 6  # 每组最多展开的领先行业数
+
     if state_df is None or state_df.empty:
         st.info("暂无板块状态数据，无法生成板块组资金迁移路径")
         return
 
-    # 1) 计算每个板块组的净资金流
+    # 1) 计算每个板块组、每个行业的净资金流
     group_net = {}
+    group_industries = {}  # group -> [{"name","state","net"}, ...]
     for gname, ginfo in SECTOR_GROUPS.items():
         codes = set(ginfo["level2_codes"])
         gdf = state_df[state_df["sector_code"].isin(codes)]
@@ -180,6 +183,13 @@ def render_group_capital_path(state_df: pd.DataFrame):
             continue
         net = gdf["state"].map(_STATE_FLOW_WEIGHT).fillna(0.0).sum()
         group_net[gname] = net
+        for _, row in gdf.iterrows():
+            w = _STATE_FLOW_WEIGHT.get(row["state"], 0.0)
+            group_industries.setdefault(gname, []).append({
+                "name": row.get("sector_name", row["sector_code"]),
+                "state": row["state"],
+                "net": w,
+            })
 
     if not group_net:
         st.info("当前无板块组数据")
@@ -193,32 +203,99 @@ def render_group_capital_path(state_df: pd.DataFrame):
         st.info("当前没有同时出现『净流出板块组』与『净流入板块组』，无法绘制组间迁移路径")
         return
 
-    # 3) 构建组间 Sankey：每个流出组 → 每个流入组，权重=流出量 × 流入量
-    node_labels = []
-    node_colors = []
-    node_map = {}
-    for g in sources:
-        node_map[("out", g)] = len(node_labels)
-        node_labels.append(f"{g}\n（净流出）")
-        node_colors.append("#F44336")  # 红：资金流出
-    for g in sinks:
-        node_map[("in", g)] = len(node_labels)
-        node_labels.append(f"{g}\n（净流入）")
-        node_colors.append("#4CAF50")  # 绿：资金流入
+    total_out = sum(sources.values())  # = total_in
 
-    links_source, links_target, links_value = [], [], []
-    for gs, out_v in sources.items():
-        for gi, in_v in sinks.items():
-            links_source.append(node_map[("out", gs)])
-            links_target.append(node_map[("in", gi)])
-            links_value.append(out_v * in_v)
+    # 3) 构建四层 Sankey 节点
+    node_labels, node_colors, node_map = [], [], {}
+    def add_node(label, color):
+        if label not in node_map:
+            node_map[label] = len(node_labels)
+            node_labels.append(label)
+            node_colors.append(color)
+        return node_map[label]
+
+    out_groups = list(sources.keys())
+    in_groups = list(sinks.keys())
+
+    # 流出行业（浅红）/ 流出组其余行业（浅粉）
+    for g in out_groups:
+        inds = sorted([i for i in group_industries.get(g, []) if i["net"] < 0], key=lambda x: x["net"])
+        for i in inds[:TOP_N]:
+            add_node(f"{i['name']}\n({i['state']})", "#EF9A9A")
+        if len(inds) > TOP_N:
+            add_node(f"{g}·其他{len(inds) - TOP_N}行业\n（净流出）", "#F8BBD0")
+    # 净流出板块组（深红）
+    for g in out_groups:
+        add_node(f"{g}\n（净流出）", "#F44336")
+    # 净流入板块组（深绿）
+    for g in in_groups:
+        add_node(f"{g}\n（净流入）", "#4CAF50")
+    # 流入行业（浅绿）/ 流入组其余行业（浅绿灰）
+    for g in in_groups:
+        inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
+        for i in inds[:TOP_N]:
+            add_node(f"{i['name']}\n({i['state']})", "#A5D6A7")
+        if len(inds) > TOP_N:
+            add_node(f"{g}·其他{len(inds) - TOP_N}行业\n（净流入）", "#C8E6C9")
+
+    # 4) 构建连线
+    links_source, links_target, links_value, links_color = [], [], [], []
+    # 流出行业 → 净流出板块组
+    for g in out_groups:
+        inds = sorted([i for i in group_industries.get(g, []) if i["net"] < 0], key=lambda x: x["net"])
+        for i in inds[:TOP_N]:
+            links_source.append(node_map[f"{i['name']}\n({i['state']})"])
+            links_target.append(node_map[f"{g}\n（净流出）"])
+            links_value.append(-i["net"])
+            links_color.append("rgba(244,67,54,0.35)")
+        if len(inds) > TOP_N:
+            rv = sum(-i["net"] for i in inds[TOP_N:])
+            links_source.append(node_map[f"{g}·其他{len(inds) - TOP_N}行业\n（净流出）"])
+            links_target.append(node_map[f"{g}\n（净流出）"])
+            links_value.append(rv)
+            links_color.append("rgba(244,67,54,0.25)")
+    # 净流出板块组 → 净流入板块组（按流入占比分配，保证守恒）
+    for g_out, out_v in sources.items():
+        for g_in, in_v in sinks.items():
+            w = out_v * (in_v / total_out)
+            if w <= 0:
+                continue
+            links_source.append(node_map[f"{g_out}\n（净流出）"])
+            links_target.append(node_map[f"{g_in}\n（净流入）"])
+            links_value.append(w)
+            links_color.append("rgba(255,152,0,0.3)")
+    # 净流入板块组 → 流入行业
+    for g in in_groups:
+        inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
+        for i in inds[:TOP_N]:
+            links_source.append(node_map[f"{g}\n（净流入）"])
+            links_target.append(node_map[f"{i['name']}\n({i['state']})"])
+            links_value.append(i["net"])
+            links_color.append("rgba(76,175,80,0.35)")
+        if len(inds) > TOP_N:
+            rv = sum(i["net"] for i in inds[TOP_N:])
+            links_source.append(node_map[f"{g}\n（净流入）"])
+            links_target.append(node_map[f"{g}·其他{len(inds) - TOP_N}行业\n（净流入）"])
+            links_value.append(rv)
+            links_color.append("rgba(76,175,80,0.25)")
+
+    # 5) 绘制
+    n_ind_nodes = sum(
+        (min(len([i for i in group_industries.get(g, []) if i["net"] < 0]), TOP_N)
+         + (1 if len([i for i in group_industries.get(g, []) if i["net"] < 0]) > TOP_N else 0))
+        for g in out_groups
+    ) + sum(
+        (min(len([i for i in group_industries.get(g, []) if i["net"] > 0]), TOP_N)
+         + (1 if len([i for i in group_industries.get(g, []) if i["net"] > 0]) > TOP_N else 0))
+        for g in in_groups
+    )
 
     fig = go.Figure(
         go.Sankey(
-            textfont={"size": 16, "color": "black", "family": "Arial, sans-serif"},
+            textfont={"size": 14, "color": "black", "family": "Arial, sans-serif"},
             node={
-                "pad": 20,
-                "thickness": 28,
+                "pad": 18,
+                "thickness": 24,
                 "line": {"color": "gray", "width": 0.5},
                 "label": node_labels,
                 "color": node_colors,
@@ -227,21 +304,26 @@ def render_group_capital_path(state_df: pd.DataFrame):
                 "source": links_source,
                 "target": links_target,
                 "value": links_value,
-                "color": ["rgba(255,152,0,0.3)"] * len(links_source),
+                "color": links_color,
             },
         )
     )
     fig.update_layout(
         title=dict(
-            text="板块组之间的资金迁移路径（弱组 → 强组）",
+            text="板块组之间资金迁移路径（行业 → 组 → 组 → 行业）",
             font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
         ),
-        height=400 + len(node_labels) * 30,
+        height=max(420, n_ind_nodes * 16 + 160),
         margin={"l": 10, "r": 10, "t": 50, "b": 10},
-        font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
+        font={"size": 14, "color": "black", "family": "Arial, sans-serif"},
         paper_bgcolor="white",
     )
     st.plotly_chart(fig, use_container_width=True, key="group_capital_sankey")
+
+    st.caption(
+        "浅红=净流出行业、深红=净流出板块组；深绿=净流入板块组、浅绿=净流入行业；"
+        "「其他N行业」= 该板块组内资金流其余行业的合计。连线粗细代表迁移强度。"
+    )
 
 
 def render(show_header: bool = True):
