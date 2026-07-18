@@ -10,6 +10,7 @@ import pandas as pd
 import numpy as np
 
 from config.sector_map import get_sector_name
+from model.state_machine import StateMachine
 
 # 状态颜色映射
 STATE_COLORS = {
@@ -35,6 +36,26 @@ STATE_EMOJI = {
     "⑧下跌中继": "🔴",
     "⑨底背离":   "🟢",
 }
+
+
+# ================================================================
+# 交易信号（买卖建议）辅助函数
+#   单一来源：model.state_machine.StateMachine 的 STATE_SIGNAL_MAP / SIGNAL_COLORS
+#   买入=红 / 卖出=绿 / 持有=橙 / 观望=灰
+# ================================================================
+def get_state_signal(state: str) -> str:
+    """返回某九宫格状态的交易信号：买入 / 卖出 / 持有 / 观望"""
+    return StateMachine.STATE_SIGNAL_MAP.get(state, StateMachine.SIGNAL_WATCH)
+
+
+def get_state_signal_color(state: str) -> str:
+    """返回某九宫格状态交易信号的配色"""
+    return StateMachine.SIGNAL_COLORS.get(get_state_signal(state), "#9e9e9e")
+
+
+def get_signal_legend() -> list:
+    """返回信号图例（买入 / 卖出 / 持有 / 观望 及对应状态与说明）"""
+    return StateMachine().get_signal_legend()
 
 
 def _make_sparkline(values: list, color: str = "#4CAF50", height: int = 60) -> go.Figure:

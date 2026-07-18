@@ -77,6 +77,38 @@ class StateMachine:
         ("增强", "下跌"): STATE_9,
     }
 
+    # ============================================================
+    # 交易信号：每个九宫格状态对应的买卖建议
+    #   买入：相对强度转强 / 底部背离，可逢低布局（⑥弱转强、⑨底背离）
+    #   卖出：动能见顶或转弱，宜减仓止盈（①领涨减速、③加速冲顶、④强转弱）
+    #   持有：趋势完好，继续持有（②稳健上行）
+    #   观望：方向不明或空头，暂观望/空仓（⑤中性震荡、⑦持续杀跌、⑧下跌中继）
+    # ============================================================
+    SIGNAL_BUY = "买入"
+    SIGNAL_SELL = "卖出"
+    SIGNAL_HOLD = "持有"
+    SIGNAL_WATCH = "观望"
+
+    STATE_SIGNAL_MAP = {
+        STATE_1: SIGNAL_SELL,   # ①领涨减速 → 卖出
+        STATE_2: SIGNAL_HOLD,   # ②稳健上行 → 持有
+        STATE_3: SIGNAL_SELL,   # ③加速冲顶 → 卖出
+        STATE_4: SIGNAL_SELL,   # ④强转弱 → 卖出
+        STATE_5: SIGNAL_WATCH,  # ⑤中性震荡 → 观望
+        STATE_6: SIGNAL_BUY,    # ⑥弱转强 → 买入
+        STATE_7: SIGNAL_WATCH,  # ⑦持续杀跌 → 观望
+        STATE_8: SIGNAL_WATCH,  # ⑧下跌中继 → 观望
+        STATE_9: SIGNAL_BUY,    # ⑨底背离 → 买入
+    }
+
+    # 信号配色（红=买入/做多，绿=卖出，橙=持有，灰=观望）
+    SIGNAL_COLORS = {
+        SIGNAL_BUY: "#e23c3c",
+        SIGNAL_SELL: "#16a34a",
+        SIGNAL_HOLD: "#f59e0b",
+        SIGNAL_WATCH: "#9e9e9e",
+    }
+
     def __init__(self, parquet_store=None, sqlite_store=None):
         """
         初始化状态机
@@ -109,6 +141,45 @@ class StateMachine:
             return "减弱"
         else:
             return "走平"
+
+    # ============================================================
+    # 交易信号
+    # ============================================================
+    def get_signal(self, state: str) -> str:
+        """
+        返回某九宫格状态对应的交易信号
+
+        返回: "买入" / "卖出" / "持有" / "观望"
+        """
+        return self.STATE_SIGNAL_MAP.get(state, self.SIGNAL_WATCH)
+
+    def get_signal_color(self, state: str) -> str:
+        """返回某九宫格状态交易信号的配色"""
+        return self.SIGNAL_COLORS.get(self.get_signal(state), "#9e9e9e")
+
+    def get_signal_legend(self) -> List[Dict[str, str]]:
+        """
+        返回信号图例（按 买入 → 卖出 → 持有 → 观望 顺序）
+
+        每项: {"signal", "color", "desc", "states"}
+        """
+        order = [self.SIGNAL_BUY, self.SIGNAL_SELL, self.SIGNAL_HOLD, self.SIGNAL_WATCH]
+        desc = {
+            self.SIGNAL_BUY: "相对强度转强 / 底部背离，可逢低布局",
+            self.SIGNAL_SELL: "动能见顶或转弱，宜减仓止盈",
+            self.SIGNAL_HOLD: "趋势完好，继续持有",
+            self.SIGNAL_WATCH: "方向不明或空头，暂观望/空仓",
+        }
+        out = []
+        for sig in order:
+            states = [s for s, v in self.STATE_SIGNAL_MAP.items() if v == sig]
+            out.append({
+                "signal": sig,
+                "color": self.SIGNAL_COLORS.get(sig, "#9e9e9e"),
+                "desc": desc.get(sig, ""),
+                "states": states,
+            })
+        return out
 
     # ============================================================
     # 状态判断

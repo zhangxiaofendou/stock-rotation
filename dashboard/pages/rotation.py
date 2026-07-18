@@ -20,7 +20,10 @@ from model.state_machine import StateMachine
 from model.scoring import SectorScoring
 from model.mirror_pair import MirrorPair
 from config.sector_map import get_sector_name
-from dashboard.components.state_card import render_state_card, STATE_COLORS, STATE_EMOJI
+from dashboard.components.state_card import (
+    render_state_card, STATE_COLORS, STATE_EMOJI,
+    get_state_signal, get_state_signal_color, get_signal_legend,
+)
 from dashboard.components.drill_pickers import (
     load_all_sector_states as _load_drill_states,
     render_state_picker,
@@ -149,11 +152,15 @@ def _render_heatmap(state_df: pd.DataFrame):
     .nine-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
     .nine-grid td { 
         padding: 12px; text-align: center; vertical-align: top; 
-        border: 1px solid #e0e0e0; width: 33%; height: 140px;
+        border: 1px solid #e0e0e0; width: 33%; height: 150px;
     }
     .nine-grid .state-name { font-weight: bold; font-size: 14px; margin-bottom: 4px; }
     .nine-grid .count { font-size: 22px; font-weight: bold; margin-bottom: 4px; }
     .nine-grid .sectors { font-size: 11px; color: #666; line-height: 1.4; }
+    .nine-grid .signal-pill {
+        display: inline-block; margin: 4px 0 6px; padding: 1px 10px;
+        border-radius: 10px; font-size: 12px; font-weight: 700; color: #fff;
+    }
     </style>
     <table class="nine-grid">
     """
@@ -167,6 +174,8 @@ def _render_heatmap(state_df: pd.DataFrame):
             data = grid_data[state_label]
             color = STATE_COLORS.get(state_label, "#9E9E9E")
             emoji = STATE_EMOJI.get(state_label, "")
+            signal = get_state_signal(state_label)
+            signal_color = get_state_signal_color(state_label)
 
             # 根据状态设置背景色
             if state_label in ["⑥弱转强", "⑨底背离"]:
@@ -189,6 +198,7 @@ def _render_heatmap(state_df: pd.DataFrame):
             html += f"""
             <td style="background-color:{bg};">
                 <div class="state-name" style="color:{color};">{emoji} {state_label}</div>
+                <div class="signal-pill" style="background-color:{signal_color};">{signal}</div>
                 <div class="count" style="color:{color};">{data['count']}</div>
                 <div class="sectors">{sectors_html or '-'}</div>
             </td>
@@ -197,6 +207,18 @@ def _render_heatmap(state_df: pd.DataFrame):
         html += "</tr>"
 
     html += "</table>"
+
+    # 信号图例
+    legend_items = []
+    for item in get_signal_legend():
+        states = "、".join(s[1:] for s in item["states"])  # 去圆圈数字前缀
+        legend_items.append(
+            f'<span style="display:inline-block;margin:6px 14px 6px 0;font-size:13px;color:#333;">'
+            f'<span style="display:inline-block;padding:1px 9px;border-radius:10px;color:#fff;'
+            f'font-weight:700;background-color:{item["color"]};">{item["signal"]}</span>'
+            f' <span style="color:#666;">{item["desc"]}（{states}）</span></span>'
+        )
+    html += '<div style="margin-top:10px;line-height:1.8;">' + "".join(legend_items) + "</div>"
 
     st.html(html)
 

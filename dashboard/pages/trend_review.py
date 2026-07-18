@@ -28,7 +28,10 @@ from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from config.settings import PARQUET_DIR
-from dashboard.components.state_card import STATE_COLORS, STATE_EMOJI
+from dashboard.components.state_card import (
+    STATE_COLORS, STATE_EMOJI,
+    get_state_signal, get_state_signal_color, get_signal_legend,
+)
 
 
 # ================================================================
@@ -250,10 +253,11 @@ def _render_heatmap(state_df: pd.DataFrame):
     html = """
     <style>
     .nine-grid { width:100%; border-collapse:collapse; table-layout:fixed; }
-    .nine-grid td { padding:12px; text-align:center; vertical-align:top; border:1px solid #e0e0e0; width:33%; height:130px; }
+    .nine-grid td { padding:12px; text-align:center; vertical-align:top; border:1px solid #e0e0e0; width:33%; height:150px; }
     .nine-grid .sn { font-weight:bold; font-size:14px; margin-bottom:4px; }
     .nine-grid .cnt { font-size:22px; font-weight:bold; margin-bottom:4px; }
     .nine-grid .sc { font-size:11px; color:#666; line-height:1.4; }
+    .nine-grid .pill { display:inline-block; margin:4px 0 6px; padding:1px 10px; border-radius:10px; font-size:12px; font-weight:700; color:#fff; }
     </style>
     <table class="nine-grid">
     """
@@ -265,18 +269,34 @@ def _render_heatmap(state_df: pd.DataFrame):
             bg = GRID_BG.get(sl, "#F5F5F5")
             emoji = STATE_EMOJI.get(sl, "")
             color = STATE_COLORS.get(sl, "#9E9E9E")
+            signal = get_state_signal(sl)
+            signal_color = get_state_signal_color(sl)
             sc = "<br>".join(grid_data[sl]["sectors"][:8])
             if len(grid_data[sl]["sectors"]) > 8:
                 sc += f"<br>...等{len(grid_data[sl]['sectors'])}个"
             html += f"""
             <td style="background-color:{bg};">
                 <div class="sn" style="color:{color};">{emoji} {sl}</div>
+                <div class="pill" style="background-color:{signal_color};">{signal}</div>
                 <div class="cnt" style="color:{color};">{grid_data[sl]['count']}</div>
                 <div class="sc">{sc or '-'}</div>
             </td>
             """
         html += "</tr>"
     html += "</table>"
+
+    # 信号图例
+    legend_items = []
+    for item in get_signal_legend():
+        states = "、".join(s[1:] for s in item["states"])
+        legend_items.append(
+            f'<span style="display:inline-block;margin:6px 14px 6px 0;font-size:13px;color:#333;">'
+            f'<span style="display:inline-block;padding:1px 9px;border-radius:10px;color:#fff;'
+            f'font-weight:700;background-color:{item["color"]};">{item["signal"]}</span>'
+            f' <span style="color:#666;">{item["desc"]}（{states}）</span></span>'
+        )
+    html += '<div style="margin-top:10px;line-height:1.8;">' + "".join(legend_items) + "</div>"
+
     st.html(html)
 
 
@@ -400,6 +420,16 @@ def render():
         with colR:
             st.markdown(f"**{chosen_name}（{chosen_code}）**")
             _render_state_badge(chosen_trend, chosen_badge, chosen_state)
+
+            # 交易信号（买卖建议）
+            sig = get_state_signal(chosen_state)
+            sig_color = get_state_signal_color(chosen_state)
+            st.markdown(
+                f'<div style="margin:2px 0 8px;">交易信号：'
+                f'<span style="display:inline-block;padding:1px 12px;border-radius:10px;'
+                f'color:#fff;font-weight:700;font-size:14px;background-color:{sig_color};">{sig}</span></div>',
+                unsafe_allow_html=True,
+            )
 
             # 趋势语义说明
             if chosen_trend == "横盘" and isinstance(chosen_badge, (int, float)) and chosen_badge < 0:
