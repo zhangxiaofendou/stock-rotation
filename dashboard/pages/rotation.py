@@ -6,7 +6,6 @@
 
 import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
@@ -531,7 +530,7 @@ def _get_suggestion(state: str, prev_state: str) -> str:
 def render():
     """渲染板块轮动监控页面"""
     st.title("板块轮动监控")
-    st.markdown("九宫格热力图、板块强弱排行、板块详情、趋势验证、个股下钻")
+    st.markdown("九宫格热力图、板块详情、趋势验证、个股下钻")
 
     with st.spinner("加载轮动数据..."):
         state_df = load_state_df()
@@ -542,9 +541,9 @@ def render():
         return
 
     # ================================================================
-    # Tab切换：热力图 | 排行表 | 板块详情 | 趋势验证 | 个股下钻
+    # Tab切换：热力图 | 板块详情 | 趋势验证 | 个股下钻
     # ================================================================
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["九宫格热力图", "板块强弱排行", "板块详情", "趋势验证", "个股下钻"])
+    tab1, tab2, tab3, tab4 = st.tabs(["九宫格热力图", "板块详情", "趋势验证", "个股下钻"])
 
     # ================================================================
     # Tab 1: 九宫格热力图
@@ -588,83 +587,9 @@ def render():
                             st.markdown(f"RS动量: {row['rs_momentum_percentile']:.1f}%")
 
     # ================================================================
-    # Tab 2: 板块强弱排行
+    # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
     # ================================================================
     with tab2:
-        st.subheader("板块综合评分排行")
-
-        if score_df is not None and not score_df.empty:
-            # 准备显示数据
-            display_df = score_df.copy()
-            display_df["排名"] = display_df["rank"]
-            display_df["板块名称"] = display_df["sector_name"]
-            display_df["板块代码"] = display_df["sector_code"]
-
-            # 状态emoji列
-            display_df["状态"] = display_df["state"].apply(
-                lambda s: f"{STATE_EMOJI.get(s, '')} {s}" if s else "未知"
-            )
-
-            display_df["评分"] = display_df["score"].apply(lambda x: f"{x:.1f}")
-
-            # 子评分
-            display_df["RS位置"] = display_df["rs_position_score"].apply(lambda x: f"{x:.1f}")
-            display_df["RS动量"] = display_df["rs_momentum_score"].apply(lambda x: f"{x:.1f}")
-            display_df["趋势"] = display_df["trend_score"].apply(lambda x: f"{x:.1f}")
-
-            # 选择显示列
-            show_cols = ["排名", "板块名称", "板块代码", "状态", "评分", "RS位置", "RS动量", "趋势"]
-
-            # 搜索过滤
-            search = st.text_input("搜索板块名称或代码", placeholder="输入关键词筛选...")
-            if search:
-                mask = (
-                    display_df["板块名称"].str.contains(search, na=False)
-                    | display_df["板块代码"].str.contains(search, na=False)
-                )
-                display_df = display_df[mask]
-
-            # 状态筛选
-            available_states = sorted(score_df["state"].dropna().unique())
-            selected_states = st.multiselect(
-                "按状态筛选",
-                available_states,
-                default=[],
-                format_func=lambda s: f"{STATE_EMOJI.get(s, '')} {s}",
-            )
-            if selected_states:
-                display_df = display_df[display_df["state"].isin(selected_states)]
-
-            # 渲染表格（带状态背景色）
-            st.dataframe(
-                display_df[show_cols],
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "排名": st.column_config.NumberColumn(width="small"),
-                    "评分": st.column_config.NumberColumn(width="small"),
-                    "RS位置": st.column_config.NumberColumn(width="small"),
-                    "RS动量": st.column_config.NumberColumn(width="small"),
-                    "趋势": st.column_config.NumberColumn(width="small"),
-                },
-            )
-
-            # 评分分布图
-            st.subheader("评分分布")
-            fig_score = px.histogram(
-                score_df, x="score", nbins=20,
-                color_discrete_sequence=["#4CAF50"],
-                labels={"score": "综合评分"},
-            )
-            fig_score.update_layout(height=300, margin={"l": 10, "r": 10, "t": 10, "b": 10})
-            st.plotly_chart(fig_score, use_container_width=True)
-        else:
-            st.warning("暂无评分数据")
-
-    # ================================================================
-    # Tab 3: 板块详情（原独立页面迁入，替换板块卡片）
-    # ================================================================
-    with tab3:
         st.subheader("板块详情")
         st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 板块详情")
 
@@ -789,11 +714,11 @@ def render():
                 st.dataframe(display_series, use_container_width=True, hide_index=True)
 
     # ================================================================
-    # Tab 4: 趋势验证（板块趋势对照 + 250日K线）
+    # Tab 3: 趋势验证（板块趋势对照 + 250日K线）
     # ================================================================
-    with tab4:
+    with tab3:
         st.subheader("板块趋势验证（价格趋势 vs K线）")
-        st.caption("对照全板块「绝对价格趋势（含横盘穿越天数角标）、RS分位、动量分位、横截面排名、九宫格状态」与 250 日 K 线，人工验证状态判定合理性。")
+        st.caption("对照全板块「绝对价格趋势（含横盘穿越天数角标）、综合评分、RS分位、动量分位、横截面排名、九宫格状态」与 250 日 K 线，人工验证状态判定合理性。")
 
         st.info(
             "📐 趋势分界线：上穿60日线 = 上涨（红）｜ 击穿60日线 = 下跌（绿）｜ "
@@ -809,6 +734,13 @@ def render():
             data_date = str(state_df["date"].iloc[0])[:10] if "date" in state_df.columns else "未知"
             st.caption(f"📅 数据截面：{data_date}　共 {len(state_df)} 个板块")
 
+            # 综合评分映射（取自板块强弱排行的 score_df）
+            score_map = {}
+            if score_df is not None and not score_df.empty:
+                score_map = {
+                    str(c): s for c, s in zip(score_df["sector_code"], score_df["score"])
+                }
+
             # 组装显示表
             rows = []
             for _, r in state_df.iterrows():
@@ -820,6 +752,7 @@ def render():
                     "RS分位(%)": round(float(r["rs_percentile"]), 1) if r["rs_percentile"] is not None else None,
                     "动量分位(%)": round(float(r["rs_momentum_percentile"]), 1) if r["rs_momentum_percentile"] is not None else None,
                     "横截面(%)": round(float(r["rs_momentum_cross_pct"]), 1) if r.get("rs_momentum_cross_pct") is not None else None,
+                    "综合评分": round(float(score_map[str(code)]), 1) if str(code) in score_map and score_map[str(code)] is not None else None,
                     "九宫格状态": f"{STATE_EMOJI.get(r['state'], '')} {r['state']}",
                     "板块代码": code,
                 })
@@ -849,6 +782,7 @@ def render():
                         "RS分位(%)": st.column_config.NumberColumn("RS分位(%)", format="%.1f", width="small"),
                         "动量分位(%)": st.column_config.NumberColumn("动量分位(%)", format="%.1f", width="small"),
                         "横截面(%)": st.column_config.NumberColumn("横截面(%)", format="%.1f", width="small"),
+                        "综合评分": st.column_config.NumberColumn("综合评分", format="%.1f", width="small"),
                         "九宫格状态": st.column_config.TextColumn("九宫格状态", width="medium"),
                         "板块代码": st.column_config.TextColumn("代码", width="small"),
                     },
@@ -899,9 +833,9 @@ def render():
                 _render_kline_chart(kline, chosen_name)
 
     # ================================================================
-    # Tab 5: 个股下钻（原独立页面迁入，作为一个页签）
+    # Tab 4: 个股下钻（原独立页面迁入，作为一个页签）
     # ================================================================
-    with tab5:
+    with tab4:
         render_stock_drill()
 
 
