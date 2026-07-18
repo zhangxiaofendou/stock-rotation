@@ -16,6 +16,7 @@ from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.mirror_pair import MirrorPair
+from config.sector_map import SECTOR_GROUPS
 from dashboard.components.state_card import STATE_EMOJI
 
 
@@ -106,7 +107,7 @@ def _render_sankey(mirror_pairs: list):
         paper_bgcolor="white",
     )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, use_container_width=True, key="mirror_sankey")
 
 
 def _render_mirror_table(mirror_pairs: list):
@@ -144,10 +145,107 @@ def _render_mirror_table(mirror_pairs: list):
     )
 
 
-def render():
-    """渲染镜像对监控页面"""
-    st.title("镜像对监控")
-    st.markdown("监控板块间资金迁移的镜像对关系")
+@st.cache_data(ttl=86400)
+def load_state_for_mirror():
+    """加载板块状态（用于板块组信号平衡统计，独立缓存）"""
+    sm, _ = get_models()
+    return sm.calc_all_sectors_state()
+
+
+def _calc_group_signal_stats(state_df: pd.DataFrame) -> dict:
+    """
+    按板块组(关联组)计算强弱信号平衡，复用市场温度计的口径：
+    - 买入信号：⑥弱转强、⑨底背离
+    - 卖出信号：①领涨减速、④强转弱、⑦持续杀跌
+    返回: {group_name: {"total", "buy_count", "sell_count"}}
+    """
+    result = {}
+    if state_df is None or state_df.empty:
+        return result
+    for group_name, group_info in SECTOR_GROUPS.items():
+        group_codes = set(group_info["level2_codes"])
+        group_df = state_df[state_df["sector_code"].isin(group_codes)]
+        if len(group_df) > 0:
+            buy_states = group_df[group_df["state"].isin(["⑥弱转强", "⑨底背离"])]
+            sell_states = group_df[group_df["state"].isin(["①领涨减速", "④强转弱", "⑦持续杀跌"])]
+            result[group_name] = {
+                "total": len(group_df),
+                "buy_count": len(buy_states),
+                "sell_count": len(sell_states),
+            }
+    return result
+
+
+def _render_group_monitor(mirror_pairs: list):
+    """
+    板块组镜像对监控：把市场温度计的「板块组强弱」概念引入镜像对模块。
+    先给每个板块组一张强弱信号平衡表，再按板块组折叠展开各自的镜像对。
+    """
+    st.subheader("板块组镜像对监控")
+    st.caption("按板块组(关联组)维度监控资金镜像关系：组内强弱信号此消彼长，红为流出、绿为流入")
+
+    state_df = load_state_for_mirror()
+    group_stats = _calc_group_signal_stats(state_df)
+
+    # 组内镜像对归集
+    group_pairs = {}
+    for mp in mirror_pairs:
+        group_pairs.setdefault(mp["group"], []).append(mp)
+
+    if not group_stats:
+        st.warning("暂无板块组信号数据")
+        return
+
+    # 概览表：每个板块组的强弱信号平衡 + 组内镜像对数
+    table_rows = []
+    for g, s in group_stats.items():
+        n_pairs = len(group_pairs.get(g, []))
+        table_rows.append({
+            "板块组": g,
+            "板块数": s["total"],
+            "买入信号": s["buy_count"],
+            "卖出信号": s["sell_count"],
+            "买入占比": f"{s['buy_count'] / max(s['total'], 1):.1%}",
+            "卖出占比": f"{s['sell_count'] / max(s['total'], 1):.1%}",
+            "组内镜像对": n_pairs,
+        })
+    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+
+    # 折叠展开：每个板块组内的镜像对
+    st.markdown("---")
+    for g in sorted(group_stats.keys(), key=lambda x: -len(group_pairs.get(x, []))):
+        s = group_stats[g]
+        pairs = group_pairs.get(g, [])
+        with st.expander(
+            f"{g} · 板块{s['total']}个 · 买{s['buy_count']}/卖{s['sell_count']} · 镜像对{len(pairs)}对",
+            expanded=False,
+        ):
+            if pairs:
+                for mp in pairs:
+                    c1, c2, c3 = st.columns([2, 1, 2])
+                    with c1:
+                        st.markdown(
+                            f"{STATE_EMOJI.get(mp['weak_state'], '')} **{mp['weak_name']}** "
+                            f"({mp['weak_state']})"
+                        )
+                    with c2:
+                        st.markdown(f"→ {mp['pair_type']} →")
+                        st.caption(f"置信度: {mp['confidence']:.1%}")
+                    with c3:
+                        st.markdown(
+                            f"{STATE_EMOJI.get(mp['strong_state'], '')} **{mp['strong_name']}** "
+                            f"({mp['strong_state']})"
+                        )
+                    st.divider()
+            else:
+                st.caption("该板块组当前无镜像对（组内未同时出现镜像状态组合）")
+
+
+def render(show_header: bool = True):
+    """渲染镜像对监控页面（show_header=False 时用于嵌入市场温度计页签）"""
+    if show_header:
+        st.title("镜像对监控")
+        st.markdown("监控板块间资金迁移的镜像对关系")
 
     with st.spinner("加载镜像对数据..."):
         mirror_pairs = load_mirror_data()
@@ -184,37 +282,9 @@ def render():
     _render_sankey(mirror_pairs)
 
     # ================================================================
-    # 按关联组展示
+    # 板块组镜像对监控
     # ================================================================
-    st.subheader("按关联组查看")
-
-    groups = {}
-    for mp in mirror_pairs:
-        g = mp["group"]
-        if g not in groups:
-            groups[g] = []
-        groups[g].append(mp)
-
-    if groups:
-        for group_name in sorted(groups.keys()):
-            with st.expander(f"{group_name} ({len(groups[group_name])}对)", expanded=len(groups) <= 3):
-                group_pairs = groups[group_name]
-                for mp in group_pairs:
-                    c1, c2, c3 = st.columns([2, 1, 2])
-                    with c1:
-                        st.markdown(
-                            f"{STATE_EMOJI.get(mp['weak_state'], '')} **{mp['weak_name']}** "
-                            f"({mp['weak_state']})"
-                        )
-                    with c2:
-                        st.markdown(f"→ {mp['pair_type']} →")
-                        st.caption(f"置信度: {mp['confidence']:.1%}")
-                    with c3:
-                        st.markdown(
-                            f"{STATE_EMOJI.get(mp['strong_state'], '')} **{mp['strong_name']}** "
-                            f"({mp['strong_state']})"
-                        )
-                    st.divider()
+    _render_group_monitor(mirror_pairs)
 
 
 if __name__ == "__main__":

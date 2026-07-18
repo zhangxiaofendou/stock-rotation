@@ -110,6 +110,16 @@ def render():
     st.title("市场温度计")
     st.markdown("监控整体市场环境、板块状态分布和风格强弱")
 
+    tab1, tab2 = st.tabs(["市场概览", "镜像对监控"])
+    with tab1:
+        _render_market_overview()
+    with tab2:
+        from dashboard.pages.mirror_pair import render as render_mirror
+        render_mirror(show_header=False)
+
+
+def _render_market_overview():
+    """渲染市场概览（原市场温度计内容）"""
     with st.spinner("加载市场数据..."):
         market_status, state_df, state_dist, up_count, down_count, flat_count, group_stats = load_market_data()
 
