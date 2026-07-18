@@ -782,6 +782,131 @@ def render():
         # ================================================================
         # 趋势验证页签（板块趋势对照 + 250日K线）
         # ================================================================
+    @st.cache_data(ttl=3600)
+    def _load_rs_series_for_detail(sector_code: str, version: int = CACHE_VERSION):
+        """读取板块 RS 指标序列（用于展示评分详细计算过程）。"""
+        safe = str(sector_code).replace(".", "_")
+        path = os.path.join(str(PARQUET_DIR), "indicators", "rs", f"{safe}.parquet")
+        if not os.path.exists(path):
+            return None
+        df = pd.read_parquet(path)
+        if "date" in df.columns:
+            df["date"] = pd.to_datetime(df["date"])
+        return df.sort_values("date").reset_index(drop=True)
+
+    def _render_score_process(sector_code, sector_name, score_df):
+        """在趋势对照表底部展示选中板块的 4 维度 + 综合分详细计算过程（与表格选中行联动）。"""
+        st.divider()
+        st.subheader(f"🧮 {sector_name}（{sector_code}）评分详细计算过程")
+        st.caption(
+            "下方分值即上方表格中该板块对应的「综合评分 / RS横截面 / 动量横截面 / RS时序分位 / 动量时序分位」"
+            "各列数值，由真实指标逐步推导得出。"
+        )
+
+        # 已算好的 4 维度 + 综合 + 排名（来自 score_df）
+        row = None
+        if score_df is not None and not score_df.empty:
+            m = score_df[score_df["sector_code"].astype(str) == str(sector_code)]
+            if not m.empty:
+                row = m.iloc[0]
+
+        rs_df = _load_rs_series_for_detail(sector_code)
+        if rs_df is None or rs_df.empty or "rs" not in rs_df.columns:
+            st.warning("该板块暂无 RS 指标数据，无法展示计算过程。")
+            return
+
+        last = rs_df.iloc[-1]
+        rs_val = float(last["rs"]) if pd.notna(last.get("rs")) else np.nan
+        rs_mom = (float(last["rs_momentum"])
+                  if "rs_momentum" in last and pd.notna(last.get("rs_momentum")) else np.nan)
+
+        # —— 步骤①：基础输入 ——
+        st.markdown("**① 基础输入（来自 RS 指标）**")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.metric("RS（相对强度）", f"{rs_val:.4f}" if pd.notna(rs_val) else "N/A",
+                      help="RS = 板块指数收盘 ÷ 基准指数收盘；越大代表相对越强。")
+        with c2:
+            st.metric("RS动量（5日斜率）", f"{rs_mom:+.4f}" if pd.notna(rs_mom) else "N/A",
+                      help="近 5 日 RS 的线性回归斜率；>0 向上、<0 向下。")
+
+        # —— 时序分位推导（与指标生成端 _calc_percentile 完全一致）——
+        series = rs_df["rs"].dropna()
+        n_rs = len(series)
+        win = 250 if n_rs >= 250 else max(10, n_rs // 2)
+        w = series.iloc[-win:]
+        below = int((w < rs_val).sum()); equal = int((w == rs_val).sum()); n = len(w)
+        rs_ts_pct = (below + 0.5 * equal) / n * 100 if n else np.nan
+
+        mom_series = rs_df["rs_momentum"].dropna()
+        mwin = min(250, len(mom_series))
+        mw = mom_series.iloc[-mwin:] if mwin else mom_series
+        mlatest = mw.iloc[-1] if len(mw) else np.nan
+        mbelow = int((mw < mlatest).sum()); mequal = int((mw == mlatest).sum())
+        mom_ts_pct = (mbelow + 0.5 * mequal) / mwin * 100 if mwin else np.nan
+
+        # —— 步骤②：四个维度 ——
+        st.markdown("**② 四个维度分值（各维度分值 = 对应百分位，权重合计 100%）**")
+
+        def _gv(key):
+            if row is None:
+                return np.nan
+            v = row.get(key)
+            return float(v) if pd.notna(v) else np.nan
+
+        def _sp(v):
+            return f"{v:.1f}" if pd.notna(v) else "N/A"
+
+        def _top(v):
+            return f"{max(0.0, 100 - v):.1f}" if pd.notna(v) else "N/A"
+
+        rs_cross = _gv("rs_cross_score")
+        mom_cross = _gv("mom_cross_score")
+        rs_pos = _gv("rs_position_score")
+        mom_pos = _gv("rs_momentum_score")
+        score = _gv("score")
+        n_sec = len(score_df) if score_df is not None else 0
+
+        dim_rows = [
+            ("RS横截面", 0.30, rs_cross,
+             f"全市场 {n_sec} 个板块中，RS 值高于约 {_sp(rs_cross)}% 的板块（≈全市场前 {_top(rs_cross)}%）"),
+            ("动量横截面", 0.30, mom_cross,
+             f"全市场 {n_sec} 个板块中，RS动量高于约 {_sp(mom_cross)}% 的板块（≈全市场前 {_top(mom_cross)}%）"),
+            ("RS时序分位", 0.20, rs_pos,
+             f"自身最近 {n} 个交易日中，RS 低于今日的有 {below} 天（含持平 {equal} 天）"
+             f"→ ({below}+0.5×{equal})/{n}×100 = {_sp(rs_ts_pct)}"),
+            ("动量时序分位", 0.20, mom_pos,
+             f"自身最近 {mwin} 个交易日中，RS动量低于今日的有 {mbelow} 天（含持平 {mequal} 天）"
+             f"→ ({mbelow}+0.5×{mequal})/{mwin}×100 = {_sp(mom_ts_pct)}"),
+        ]
+        for label, wgt, val, desc in dim_rows:
+            col_a, col_b = st.columns([1, 3])
+            with col_a:
+                st.metric(label, f"{val:.1f}" if pd.notna(val) else "N/A")
+                st.caption(f"权重 {wgt:.0%}")
+            with col_b:
+                st.markdown(
+                    f"<span style='font-size:13px;color:#555'>{desc}</span>",
+                    unsafe_allow_html=True,
+                )
+
+        # —— 步骤③：综合评分 ——
+        st.markdown("**③ 综合评分（加权合计）**")
+        if pd.notna(score):
+            calc = (0.30 * rs_cross + 0.30 * mom_cross
+                    + 0.20 * rs_pos + 0.20 * mom_pos)
+            formula = (
+                f"= 0.30 × {rs_cross:.1f}  +  0.30 × {mom_cross:.1f}\n"
+                f"  + 0.20 × {rs_pos:.1f}  +  0.20 × {mom_pos:.1f}\n"
+                f"= {calc:.1f}"
+            )
+            st.code(formula, language="text")
+            rank = row.get("rank") if row is not None else None
+            suffix = f"　（全市场第 {int(rank)} / {n_sec} 名）" if pd.notna(rank) else ""
+            st.success(f"**综合评分 = {score:.1f}**{suffix}")
+        else:
+            st.warning("该板块综合评分暂不可用。")
+
     def _render_trend_tab(state_df, score_df):
         st.subheader("板块趋势验证（价格趋势 vs K线）")
         st.caption("对照全板块「绝对价格趋势（含横盘穿越天数角标）、综合评分与 4 个维度分值（RS横截面/动量横截面/RS时序/动量时序）、九宫格状态」与 250 日 K 线，人工验证状态判定合理性。")
@@ -931,6 +1056,9 @@ def render():
                 with st.spinner("加载K线..."):
                     kline = load_sector_kline(chosen_code)
                 _render_kline_chart(kline, chosen_name)
+
+            # 选中板块的评分详细计算过程（与上方表格选中行联动，显示在对照表最下方）
+            _render_score_process(chosen_code, chosen_name, score_df)
 
     # ================================================================
     # 受控 Tab 分发（依赖上面已定义的 _render_detail_tab / _render_trend_tab）
