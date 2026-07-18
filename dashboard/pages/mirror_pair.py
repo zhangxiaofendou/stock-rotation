@@ -16,6 +16,7 @@ from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.mirror_pair import MirrorPair
+from config.sector_map import SECTOR_GROUPS
 from dashboard.components.state_card import STATE_EMOJI
 
 
@@ -144,53 +145,80 @@ def _render_mirror_table(mirror_pairs: list):
     )
 
 
-def render_group_capital_path(mirror_pairs: list):
+# 板块状态 → 资金流向权重（正=资金流入/强势，负=资金流出/弱势，0=中性）
+_STATE_FLOW_WEIGHT = {
+    "①领涨减速": -0.6,
+    "②稳健上行": +0.6,
+    "③加速冲顶": +1.0,
+    "④强转弱":   -1.0,
+    "⑤中性震荡":  0.0,
+    "⑥弱转强":   +1.0,
+    "⑦持续杀跌": -1.0,
+    "⑧下跌中继": -0.6,
+    "⑨底背离":   +0.7,
+}
+
+
+def render_group_capital_path(state_df: pd.DataFrame):
     """
-    板块组资金迁移路径：按板块组聚合镜像对，用 Sankey 展示各组内
-    资金从弱势子板块(④/⑦)向强势子板块(⑥/③)迁移的强度。
-    复用市场温度计的板块组(关联组)口径，红=资金流出、绿=资金流入。
+    板块组之间的资金迁移路径（跨组）：
+    用各板块组的「净资金流」推导组间迁移——左侧红点=净流出板块组(弱势)，
+    右侧绿点=净流入板块组(强势)，连线粗细表示资金从弱组迁往强组的强度
+    （按 组间强弱乘积 成比例分配，总流入=总流出）。
+    净资金流 = Σ 组内各板块状态的资金权重（见 _STATE_FLOW_WEIGHT）。
     """
-    if not mirror_pairs:
-        st.info("暂无镜像对数据，无法生成板块组资金迁移路径")
+    if state_df is None or state_df.empty:
+        st.info("暂无板块状态数据，无法生成板块组资金迁移路径")
         return
 
-    # 按板块组聚合资金流强度（置信度合计，下限 0.1 保证连线可见）
-    group_flow = {}
-    for mp in mirror_pairs:
-        g = mp["group"]
-        group_flow[g] = group_flow.get(g, 0) + max(mp.get("confidence", 0.5), 0.1)
+    # 1) 计算每个板块组的净资金流
+    group_net = {}
+    for gname, ginfo in SECTOR_GROUPS.items():
+        codes = set(ginfo["level2_codes"])
+        gdf = state_df[state_df["sector_code"].isin(codes)]
+        if len(gdf) == 0:
+            continue
+        net = gdf["state"].map(_STATE_FLOW_WEIGHT).fillna(0.0).sum()
+        group_net[gname] = net
 
-    groups = list(group_flow.keys())
-    if not groups:
-        st.info("当前无板块组资金流数据")
+    if not group_net:
+        st.info("当前无板块组数据")
         return
 
-    # 节点：左侧 = 板块组(流出/弱势)，右侧 = 板块组(流入/强势)
+    # 2) 拆为净流出组（弱）与净流入组（强）
+    sources = {g: -v for g, v in group_net.items() if v < 0}  # 流出量(正)
+    sinks = {g: v for g, v in group_net.items() if v > 0}       # 流入量(正)
+
+    if not sources or not sinks:
+        st.info("当前没有同时出现『净流出板块组』与『净流入板块组』，无法绘制组间迁移路径")
+        return
+
+    # 3) 构建组间 Sankey：每个流出组 → 每个流入组，权重=流出量 × 流入量
     node_labels = []
     node_colors = []
     node_map = {}
-    for g in groups:
-        out_label = f"{g}\n（流出）"
-        in_label = f"{g}\n（流入）"
+    for g in sources:
         node_map[("out", g)] = len(node_labels)
-        node_labels.append(out_label)
+        node_labels.append(f"{g}\n（净流出）")
         node_colors.append("#F44336")  # 红：资金流出
+    for g in sinks:
         node_map[("in", g)] = len(node_labels)
-        node_labels.append(in_label)
+        node_labels.append(f"{g}\n（净流入）")
         node_colors.append("#4CAF50")  # 绿：资金流入
 
     links_source, links_target, links_value = [], [], []
-    for g in groups:
-        links_source.append(node_map[("out", g)])
-        links_target.append(node_map[("in", g)])
-        links_value.append(group_flow[g])
+    for gs, out_v in sources.items():
+        for gi, in_v in sinks.items():
+            links_source.append(node_map[("out", gs)])
+            links_target.append(node_map[("in", gi)])
+            links_value.append(out_v * in_v)
 
     fig = go.Figure(
         go.Sankey(
             textfont={"size": 16, "color": "black", "family": "Arial, sans-serif"},
             node={
-                "pad": 18,
-                "thickness": 30,
+                "pad": 20,
+                "thickness": 28,
                 "line": {"color": "gray", "width": 0.5},
                 "label": node_labels,
                 "color": node_colors,
@@ -199,16 +227,16 @@ def render_group_capital_path(mirror_pairs: list):
                 "source": links_source,
                 "target": links_target,
                 "value": links_value,
-                "color": ["rgba(255,152,0,0.35)"] * len(links_source),
+                "color": ["rgba(255,152,0,0.3)"] * len(links_source),
             },
         )
     )
     fig.update_layout(
         title=dict(
-            text="板块组资金迁移路径（组内：弱→强）",
+            text="板块组之间的资金迁移路径（弱组 → 强组）",
             font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
         ),
-        height=400 + len(groups) * 60,
+        height=400 + len(node_labels) * 30,
         margin={"l": 10, "r": 10, "t": 50, "b": 10},
         font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
         paper_bgcolor="white",
