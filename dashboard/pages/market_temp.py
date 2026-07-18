@@ -193,7 +193,7 @@ def _render_market_overview():
             xaxis_title="趋势方向",
             yaxis_title="板块数量",
         )
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width="stretch")
 
     # ================================================================
     # 九宫格状态分布
@@ -228,7 +228,7 @@ def _render_market_overview():
             xaxis={"tickangle": 30},
             yaxis_title="板块数量",
         )
-        st.plotly_chart(fig_dist, use_container_width=True)
+        st.plotly_chart(fig_dist, width="stretch")
 
         # 饼图
         fig_pie = px.pie(
@@ -241,7 +241,7 @@ def _render_market_overview():
         )
         fig_pie.update_layout(height=400, margin={"l": 10, "r": 10, "t": 10, "b": 10})
         fig_pie.update_traces(textposition="inside", textinfo="percent+label")
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width="stretch")
 
     # ================================================================
     # 风格雷达：板块组强弱统计
@@ -274,7 +274,7 @@ def _render_market_overview():
             height=400,
             margin={"l": 40, "r": 40, "t": 40, "b": 40},
         )
-        st.plotly_chart(fig_radar, use_container_width=True)
+        st.plotly_chart(fig_radar, width="stretch")
 
         # 表格形式展示
         table_data = []
@@ -288,7 +288,7 @@ def _render_market_overview():
                 "买入占比": f"{s['buy_count']/max(s['total'],1):.1%}",
                 "卖出占比": f"{s['sell_count']/max(s['total'],1):.1%}",
             })
-        st.dataframe(pd.DataFrame(table_data), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(table_data), width="stretch", hide_index=True)
 
     # ================================================================
     # 触发条件详情

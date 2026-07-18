@@ -168,4 +168,4 @@ def render_state_card(
         # RS走势Sparkline
         if rs_history and len(rs_history) >= 2:
             fig = _make_sparkline(rs_history, color=state_color)
-            st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+            st.plotly_chart(fig, width="stretch", config={"displayModeBar": False})

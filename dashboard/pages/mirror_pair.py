@@ -107,7 +107,7 @@ def _render_sankey(mirror_pairs: list):
         paper_bgcolor="white",
     )
 
-    st.plotly_chart(fig, use_container_width=True, key="mirror_sankey")
+    st.plotly_chart(fig, width="stretch", key="mirror_sankey")
 
 
 def _render_mirror_table(mirror_pairs: list):
@@ -135,7 +135,7 @@ def _render_mirror_table(mirror_pairs: list):
 
     st.dataframe(
         df,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
         column_config={
             "置信度": st.column_config.NumberColumn(
@@ -318,7 +318,7 @@ def render_group_capital_path(state_df: pd.DataFrame):
         font={"size": 14, "color": "black", "family": "Arial, sans-serif"},
         paper_bgcolor="white",
     )
-    st.plotly_chart(fig, use_container_width=True, key="group_capital_sankey")
+    st.plotly_chart(fig, width="stretch", key="group_capital_sankey")
 
     st.caption(
         "四层结构：左/浅红=流出行业，左中/深红=净流出板块组，右中/深绿=净流入板块组，右/浅绿=流入行业；"

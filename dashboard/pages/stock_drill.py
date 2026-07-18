@@ -663,7 +663,7 @@ def _render_component_list(merged_df: pd.DataFrame, sector_name: str, has_spot_d
     st.dataframe(
         display_df,
         column_config=col_config,
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -839,7 +839,7 @@ def _render_mini_kline(stock_code: str, stock_name: str):
     fig.update_yaxes(title_text="", row=1, col=1)
     fig.update_yaxes(title_text="", row=2, col=1)
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_data: bool = True):
@@ -917,7 +917,7 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_dat
                 "turnover": st.column_config.NumberColumn("换手率(%)", format="%.1f"),
                 "capital_score": st.column_config.NumberColumn("资金得分", format="%.0f"),
             },
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -994,7 +994,7 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_dat
     st.dataframe(
         final_pool[show_cols],
         column_config={k: v for k, v in pool_col_config.items() if k in show_cols},
-        use_container_width=True,
+        width="stretch",
         hide_index=True,
     )
 
@@ -1062,7 +1062,7 @@ def _render_fund_flow_detail(merged_df: pd.DataFrame):
 
         if fund_data:
             fund_df = pd.DataFrame(fund_data)
-            st.dataframe(fund_df, use_container_width=True, hide_index=True)
+            st.dataframe(fund_df, width="stretch", hide_index=True)
         else:
             st.info("暂无资金流数据")
 
@@ -1138,7 +1138,7 @@ def _render_stock_detail_popup(code: str, name: str):
                         height=400, margin={"l": 10, "r": 10, "t": 10, "b": 10},
                         xaxis_rangeslider_visible=False, legend=dict(orientation="h", y=1.1),
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, width="stretch")
             else:
                 st.info("暂无行情数据")
 
@@ -1174,9 +1174,9 @@ def _render_stock_detail_popup(code: str, name: str):
                             height=300, margin={"l": 10, "r": 10, "t": 30, "b": 10},
                             title="近30日主力资金净流入",
                         )
-                        st.plotly_chart(fig, use_container_width=True)
+                        st.plotly_chart(fig, width="stretch")
 
-                    st.dataframe(ff_df.tail(30), use_container_width=True, hide_index=True)
+                    st.dataframe(ff_df.tail(30), width="stretch", hide_index=True)
             else:
                 st.info("暂无资金流数据")
 
@@ -1312,7 +1312,7 @@ def _render_state_transitions(sector_code: str, sector_name: str):
         # 最近 10 次切换
         st.caption(f"最近 10 次状态切换（共 {len(transitions)} 次）")
         tdf = pd.DataFrame(transitions[-10:][::-1])
-        st.dataframe(tdf, use_container_width=True, hide_index=True)
+        st.dataframe(tdf, width="stretch", hide_index=True)
     else:
         st.info("该板块暂无状态切换记录")
 

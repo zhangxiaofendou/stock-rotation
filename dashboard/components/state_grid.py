@@ -196,7 +196,7 @@ def render_state_grid(state_df: pd.DataFrame):
             font={"size": 10},
         )
 
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
 
 def _hex_to_rgba(hex_color: str, alpha: float = 1.0) -> tuple:

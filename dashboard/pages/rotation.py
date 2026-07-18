@@ -600,7 +600,7 @@ def render():
         for s in state_df["state"].value_counts().index:
             state_counts[s] = int(state_df["state"].value_counts()[s])
         fig_bar = _make_state_bar(state_counts)
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width="stretch")
 
         # 重点关注区
         st.subheader("重点关注")
@@ -765,7 +765,7 @@ def render():
                     lambda d: d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d)
                 )
                 display_series = display_series.sort_values("date", ascending=False)
-                st.dataframe(display_series, use_container_width=True, hide_index=True)
+                st.dataframe(display_series, width="stretch", hide_index=True)
 
         # ================================================================
         # 趋势验证页签（板块趋势对照 + 250日K线）
