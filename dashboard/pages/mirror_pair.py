@@ -110,10 +110,14 @@ def _render_sankey(mirror_pairs: list):
     )
 
     fig.update_layout(
-        title="资金迁移路径（弱→强）",
+        title=dict(
+            text="资金迁移路径（弱→强）",
+            font={"size": 14, "color": "black"},
+        ),
         height=400 + len(node_labels) * 20,
         margin={"l": 10, "r": 10, "t": 40, "b": 10},
-        font={"size": 10},
+        font={"size": 12, "color": "black"},
+        paper_bgcolor="white",
     )
 
     st.plotly_chart(fig, use_container_width=True)
