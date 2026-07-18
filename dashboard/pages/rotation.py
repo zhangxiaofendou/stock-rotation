@@ -62,6 +62,10 @@ SCORE_WEIGHT_NOTE = (
     "（横截面为主负责横向选强，时序为辅负责过滤确认）"
 )
 
+# 缓存版本号：当评分逻辑或返回列结构发生变化时递增，
+# 强制使 Streamlit 的缓存键失效，避免旧缓存返回缺列数据。
+CACHE_VERSION = 2
+
 
 def _render_score_breakdown(score_row: pd.Series):
     """渲染综合评分明细：4 个维度分值 + 综合评分 + 各维度权重。
@@ -95,7 +99,8 @@ def get_stores():
 
 
 @st.cache_resource
-def get_models():
+def get_models(version: int = CACHE_VERSION):
+    """初始化模型（version 仅用于缓存键失效，不接收外部传参）"""
     parquet_store, sqlite_store = get_stores()
     sm = StateMachine(parquet_store, sqlite_store)
     scoring = SectorScoring(parquet_store, sqlite_store, sm)
@@ -110,7 +115,7 @@ def load_state_df():
 
 
 @st.cache_data(ttl=3600)  # 评分每日更新一次，1h 内存缓存避免重复实时计算
-def load_score_df():
+def load_score_df(version: int = CACHE_VERSION):
     """加载板块评分排行（实时计算，不再依赖任何磁盘快照文件）"""
     _, scoring = get_models()
     return scoring.calc_all_scores()
@@ -794,7 +799,25 @@ def render():
             if score_df is not None and not score_df.empty:
                 missing = [c for c in score_cols if c not in score_df.columns]
                 if missing:
-                    st.warning(f"评分数据格式异常，缺少列 {missing}，请刷新页面或重新运行数据更新流程。评分列将显示为 N/A。")
+                    st.warning(f"评分数据格式异常，缺少列 {missing}，正在自动清理缓存并重新计算...")
+                    # 自动清理缓存并重新运行（仅一次，避免无限循环）
+                    if "score_cache_auto_cleared" not in st.session_state:
+                        st.cache_data.clear()
+                        try:
+                            st.cache_resource.clear()
+                        except Exception:
+                            pass
+                        st.session_state.score_cache_auto_cleared = True
+                        st.rerun()
+                    # 手动兜底按钮
+                    if st.button("🔄 强制刷新缓存并重新计算评分", key="force_clear_score_cache"):
+                        st.cache_data.clear()
+                        try:
+                            st.cache_resource.clear()
+                        except Exception:
+                            pass
+                        st.session_state.score_cache_auto_cleared = True
+                        st.rerun()
                 else:
                     for _, sr in score_df.iterrows():
                         score_map[str(sr["sector_code"])] = {
