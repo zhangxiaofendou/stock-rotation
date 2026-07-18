@@ -864,25 +864,33 @@ def render():
             colL, colR = st.columns([0.95, 1.05])
 
             with colL:
+                # 趋势列着色：金叉(↗)箭头+天数红色、死叉(↘)箭头+天数绿色；评分列保留 1 位小数
+                def _trend_cell_color(col):
+                    styles = []
+                    for v in col:
+                        if isinstance(v, str) and "↗" in v:
+                            styles.append("color:#e23c3c;font-weight:700;")
+                        elif isinstance(v, str) and "↘" in v:
+                            styles.append("color:#16a34a;font-weight:700;")
+                        else:
+                            styles.append("")
+                    return styles
+
+                num_cols = ["综合评分", "RS横截面(%)", "动量横截面(%)",
+                            "RS时序分位(%)", "动量时序分位(%)"]
+                styled = (
+                    df.style
+                    .format({c: "{:.1f}" for c in num_cols})
+                    .apply(_trend_cell_color, axis=0, subset=["趋势"])
+                )
                 st.dataframe(
-                    df,
+                    styled,
                     key="trend_table",
                     hide_index=True,
                     on_select="rerun",
                     selection_mode="single-row",
                     height=660,
                     width="stretch",
-                    column_config={
-                        "板块名称": st.column_config.TextColumn("板块名称", width="medium"),
-                        "趋势": st.column_config.TextColumn("趋势", width="medium"),
-                        "九宫格状态": st.column_config.TextColumn("九宫格状态", width="medium"),
-                        "综合评分": st.column_config.NumberColumn("综合评分", format="%.1f", width="small"),
-                        "RS横截面(%)": st.column_config.NumberColumn("RS横截面(%)", format="%.1f", width="small"),
-                        "动量横截面(%)": st.column_config.NumberColumn("动量横截面(%)", format="%.1f", width="small"),
-                        "RS时序分位(%)": st.column_config.NumberColumn("RS时序分位(%)", format="%.1f", width="small"),
-                        "动量时序分位(%)": st.column_config.NumberColumn("动量时序分位(%)", format="%.1f", width="small"),
-                        "板块代码": st.column_config.TextColumn("代码", width="small"),
-                    },
                 )
 
                 # 读取选中行（首次未点选时默认第一行）
