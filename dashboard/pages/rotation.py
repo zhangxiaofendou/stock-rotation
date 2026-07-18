@@ -110,10 +110,26 @@ def load_state_df():
 
 
 @st.cache_data(ttl=86400)
+@st.cache_data(ttl=3600)
 def load_score_df():
-    """加载板块评分排行（独立缓存）"""
+    """加载板块评分排行（带 Streamlit 缓存 + 列完整性兜底）"""
     _, scoring = get_models()
-    return scoring.calc_all_scores()
+    score_df = scoring.calc_all_scores()
+
+    # 兜底：若旧格式快照导致缺少 4 维度列，删除快照并强制重算
+    required = ["score", "rs_cross_score", "mom_cross_score", "rs_position_score", "rs_momentum_score"]
+    if score_df is not None and not score_df.empty:
+        missing = [c for c in required if c not in score_df.columns]
+        if missing:
+            st.warning(f"检测到评分快照格式旧/损坏（缺 {missing}），正在强制重新计算...")
+            snapshot_path = scoring._get_score_snapshot_path()
+            try:
+                if os.path.exists(snapshot_path):
+                    os.remove(snapshot_path)
+            except OSError:
+                pass
+            score_df = scoring.calc_all_scores()
+    return score_df
 
 
 @st.cache_data(ttl=3600)

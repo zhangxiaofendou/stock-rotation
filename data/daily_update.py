@@ -39,7 +39,7 @@ logger = get_logger(__name__)
 # 快照缓存路径
 SNAPSHOT_DIR = PROJECT_ROOT / "data" / "storage" / "parquet" / "cache"
 STATE_SNAPSHOT = SNAPSHOT_DIR / "state_snapshot.parquet"
-SCORE_SNAPSHOT = SNAPSHOT_DIR / "score_snapshot.parquet"
+SCORE_SNAPSHOT = SNAPSHOT_DIR / "score_snapshot_v2.parquet"
 
 
 def invalidate_snapshots():

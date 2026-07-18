@@ -163,9 +163,9 @@ class SectorScoring:
         return pd.DataFrame(rows)
 
     def _get_score_snapshot_path(self) -> str:
-        """获取评分快照文件路径"""
+        """获取评分快照文件路径（使用 v2 文件名，避免旧格式快照被误读）"""
         cache_dir = os.path.join(str(PARQUET_DIR), "cache")
-        return os.path.join(cache_dir, "score_snapshot.parquet")
+        return os.path.join(cache_dir, "score_snapshot_v2.parquet")
 
     def calc_all_scores(self, date: str = None) -> Optional[pd.DataFrame]:
         """
