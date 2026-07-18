@@ -1027,6 +1027,9 @@ def render():
             )
             if sel_state and sel_state != "全部":
                 state_view = state_df[state_df["state"] == sel_state]
+                if state_view.empty:
+                    st.info(f"🟦 当前「{sel_state}」状态下暂无符合条件的板块，请选择其他状态或「全部」。")
+                    return
             else:
                 state_view = state_df
 
@@ -1092,8 +1095,10 @@ def render():
                     width="stretch",
                 )
 
-                # 读取选中行（首次未点选时默认第一行）
-                sel = st.session_state.get("trend_table", {})
+                # 读取选中行（首次未点选时默认第一行）。
+                # 注意：dataframe 的 key 是动态的 trend_table_{sel_state}，
+                # 故必须用相同的动态 key 读取选中状态，否则点击行联动永不生效。
+                sel = st.session_state.get(f"trend_table_{sel_state}", {})
                 sel_rows = sel.get("selection", {}).get("rows", []) if sel else []
                 if sel_rows:
                     chosen = df.iloc[sel_rows[0]]
