@@ -32,6 +32,7 @@ from dashboard.components.drill_pickers import (
     render_transition_picker,
     render_sector_picker,
 )
+from dashboard.pages.stock_drill import render as render_stock_drill
 
 # 状态颜色映射
 STATE_BG_COLORS = {
@@ -530,7 +531,7 @@ def _get_suggestion(state: str, prev_state: str) -> str:
 def render():
     """渲染板块轮动监控页面"""
     st.title("板块轮动监控")
-    st.markdown("九宫格热力图、板块强弱排行、板块详情、趋势验证")
+    st.markdown("九宫格热力图、板块强弱排行、板块详情、趋势验证、个股下钻")
 
     with st.spinner("加载轮动数据..."):
         state_df = load_state_df()
@@ -541,9 +542,9 @@ def render():
         return
 
     # ================================================================
-    # Tab切换：热力图 | 排行表 | 板块详情 | 趋势验证
+    # Tab切换：热力图 | 排行表 | 板块详情 | 趋势验证 | 个股下钻
     # ================================================================
-    tab1, tab2, tab3, tab4 = st.tabs(["九宫格热力图", "板块强弱排行", "板块详情", "趋势验证"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["九宫格热力图", "板块强弱排行", "板块详情", "趋势验证", "个股下钻"])
 
     # ================================================================
     # Tab 1: 九宫格热力图
@@ -896,6 +897,12 @@ def render():
                 with st.spinner("加载K线..."):
                     kline = load_sector_kline(chosen_code)
                 _render_kline_chart(kline, chosen_name)
+
+    # ================================================================
+    # Tab 5: 个股下钻（原独立页面迁入，作为一个页签）
+    # ================================================================
+    with tab5:
+        render_stock_drill()
 
 
 if __name__ == "__main__":
