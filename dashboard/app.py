@@ -113,7 +113,7 @@ def main():
         # 导航
         page = st.radio(
             "导航菜单",
-            ["市场温度计", "板块轮动监控", "板块详情", "镜像对监控", "个股下钻"],
+            ["市场温度计", "板块轮动监控", "板块详情", "趋势验证", "镜像对监控", "个股下钻"],
             index=1,  # 默认选中轮动监控
         )
 
@@ -140,6 +140,9 @@ def main():
         render()
     elif page == "板块详情":
         from dashboard.pages.sector_detail import render
+        render()
+    elif page == "趋势验证":
+        from dashboard.pages.trend_review import render
         render()
     elif page == "镜像对监控":
         from dashboard.pages.mirror_pair import render

@@ -53,6 +53,17 @@ class StateMachine:
     RS_MOMENTUM_HIGH = 70    # > 70 = 增强
     RS_MOMENTUM_LOW = 30     # < 30 = 减弱
 
+    # 横截面领跑阈值：RS动量全市场排名需进入前 RS_CROSS_LEADER_PCT% 才视为「领跑」
+    # 用于拦截「只和自己比」导致的加速冲顶假阳性（如跌250天反弹）
+    RS_CROSS_LEADER_PCT = 80
+
+    # 想法2 绝对值斜率门槛（双保险）：③加速冲顶 / ⑥弱转强 要求 RS动量显著为正
+    #   rs_momentum > 0 且 rs_momentum > K × rolling_std(rs_momentum)
+    # 自适应阈值（K×自身波动），避免银行/半导体斜率量级差异导致固定阈值失灵；
+    # 用于挡住「分位高但斜率≈0」的弱反弹（反弹时 rs_momentum 通常只是小幅转正）。
+    RS_MOMENTUM_ABS_SIGMA_K = 1.2
+    RS_MOMENTUM_ABS_SIGMA_WINDOW = 120  # 滚动窗口（交易日），min_periods=30
+
     # 状态映射表：{ (RS动量方向, 价格趋势): 状态 }
     STATE_MAP = {
         ("减弱", "上涨"): STATE_1,
@@ -102,13 +113,29 @@ class StateMachine:
     # ============================================================
     # 状态判断
     # ============================================================
-    def determine_state(self, trend: str, rs_momentum_percentile: float) -> str:
+    def determine_state(
+        self,
+        trend: str,
+        rs_momentum_percentile: float,
+        rs_momentum_cross_pct: float = None,
+        rs_momentum: float = None,
+        rs_momentum_abs_sigma: float = None,
+    ) -> str:
         """
         根据价格趋势和RS动量分位数判断当前状态
 
         参数:
             trend: 价格趋势 "上涨"/"横盘"/"下跌"
             rs_momentum_percentile: RS动量分位数 (0-100)
+            rs_momentum_cross_pct: RS动量全市场横截面百分位 (0-100)，可选。
+                提供时，③加速冲顶 需同时是全市场领跑者（>RS_CROSS_LEADER_PCT），
+                否则降级为 ②稳健上行。为 None 时退化为原逻辑（向后兼容）。
+            rs_momentum: RS动量绝对值（RS的线性回归斜率），可选。
+            rs_momentum_abs_sigma: rs_momentum 的滚动标准差，可选。
+                二者均提供且有效时，启用【想法2绝对值门槛】双保险：
+                ③加速冲顶 / ⑥弱转强 要求 rs_momentum 显著为正
+                （>0 且 > RS_MOMENTUM_ABS_SIGMA_K × 滚动std），否则降级为 ②/⑤。
+                为 None 时退化为原逻辑（向后兼容）。
 
         返回:
             状态字符串，如 "⑥弱转强"，数据不足返回 "⑤中性震荡"
@@ -120,9 +147,30 @@ class StateMachine:
         rs_dir = self._rs_direction(rs_momentum_percentile)
         state = self.STATE_MAP.get((rs_dir, trend), self.STATE_5)
 
+        # 横截面闸门：③加速冲顶 必须同时领跑全市场，否则只是「相对自己加速」而非「领先市场」
+        if state == self.STATE_3 and rs_momentum_cross_pct is not None:
+            if rs_momentum_cross_pct <= self.RS_CROSS_LEADER_PCT or np.isnan(
+                rs_momentum_cross_pct
+            ):
+                state = self.STATE_2
+
+        # 想法2 绝对值斜率门槛（双保险）：③加速冲顶 / ⑥弱转强 要求 RS动量显著为正，
+        # 挡住「分位高但斜率≈0」的弱反弹（反弹时 rs_momentum 通常只是小幅转正）。
+        if state in (self.STATE_3, self.STATE_6) and rs_momentum is not None \
+                and rs_momentum_abs_sigma is not None:
+            sig_ok = (
+                not np.isnan(rs_momentum)
+                and not np.isnan(rs_momentum_abs_sigma)
+                and rs_momentum > 0
+                and rs_momentum_abs_sigma > 0
+                and rs_momentum >= self.RS_MOMENTUM_ABS_SIGMA_K * rs_momentum_abs_sigma
+            )
+            if not sig_ok:
+                state = self.STATE_2 if trend == "上涨" else self.STATE_5
+
         logger.debug(
             f"状态判断: trend={trend}, rs_momentum_pct={rs_momentum_percentile:.1f}, "
-            f"rs_dir={rs_dir}, state={state}"
+            f"rs_cross={rs_momentum_cross_pct}, rs_dir={rs_dir}, state={state}"
         )
         return state
 
@@ -131,13 +179,30 @@ class StateMachine:
         向量化批量状态判断（比逐行 iterrows 快 50-100x）
 
         参数:
-            df: 含 trend 和 rs_momentum_percentile 列的 DataFrame
+            df: 含 trend / rs_momentum_percentile 列，
+                可选含 rs_momentum_cross_pct（横截面领跑闸门）、
+                rs_momentum / rs_momentum_abs_sigma（想法2绝对值门槛）
 
         返回:
             pd.Series: 状态字符串
         """
         pct = df["rs_momentum_percentile"].values
         trend = df["trend"].values
+        cross = (
+            df["rs_momentum_cross_pct"].values
+            if "rs_momentum_cross_pct" in df.columns
+            else None
+        )
+        rsm = (
+            df["rs_momentum"].values
+            if "rs_momentum" in df.columns
+            else None
+        )
+        sigma = (
+            df["rs_momentum_abs_sigma"].values
+            if "rs_momentum_abs_sigma" in df.columns
+            else None
+        )
 
         # RS 方向
         rs_dir = np.where(pct > self.RS_MOMENTUM_HIGH, "增强",
@@ -159,6 +224,29 @@ class StateMachine:
         mask = (rs_dir == "减弱") & (trend_norm == "上涨");  state[mask] = self.STATE_1
         mask = (rs_dir == "减弱") & (trend_norm == "横盘");  state[mask] = self.STATE_4
         mask = (rs_dir == "减弱") & (trend_norm == "下跌");  state[mask] = self.STATE_7
+
+        # 横截面闸门：③加速冲顶 必须同时是全市场 RS 动量领跑者，
+        # 否则只是「相对自己加速」而非「领先市场」，降级为 ②稳健上行。
+        if cross is not None:
+            not_leader = (rs_dir == "增强") & (trend_norm == "上涨") & (
+                np.isnan(cross) | (cross <= self.RS_CROSS_LEADER_PCT)
+            )
+            state[not_leader] = self.STATE_2
+
+        # 想法2 绝对值斜率门槛（双保险）：③加速冲顶 / ⑥弱转强 要求 RS动量显著为正。
+        # 弱反弹时 rs_momentum 通常只是小幅转正（< K×自身波动），直接降级为 ②/⑤。
+        if rsm is not None and sigma is not None:
+            sig_ok = (
+                ~np.isnan(rsm) & ~np.isnan(sigma)
+                & (rsm > 0) & (sigma > 0)
+                & (rsm >= self.RS_MOMENTUM_ABS_SIGMA_K * sigma)
+            )
+            weak_enh = (
+                (rs_dir == "增强") & ~sig_ok
+                & ((trend_norm == "上涨") | (trend_norm == "横盘"))
+            )
+            down = np.where(trend_norm == "上涨", self.STATE_2, self.STATE_5)
+            state[weak_enh] = down[weak_enh]
 
         return pd.Series(state, index=df.index)
 
@@ -268,6 +356,10 @@ class StateMachine:
         rs_cols = ["date", "rs_momentum_percentile"]
         if "rs_percentile" in rs_df.columns:
             rs_cols.append("rs_percentile")
+        if "rs_momentum_cross_pct" in rs_df.columns:
+            rs_cols.append("rs_momentum_cross_pct")
+        if "rs_momentum" in rs_df.columns:
+            rs_cols.append("rs_momentum")
         merged = pd.merge(
             rs_df[rs_cols],
             trend_df[["date", "trend"]],
@@ -287,6 +379,14 @@ class StateMachine:
             logger.warning(f"板块 {sector_code} 有效趋势数据为空")
             return None
 
+        # 计算 RS动量 滚动标准差（想法2绝对值门槛用，自适应阈值）
+        if "rs_momentum" in merged.columns:
+            merged["rs_momentum_abs_sigma"] = (
+                merged["rs_momentum"]
+                .rolling(window=self.RS_MOMENTUM_ABS_SIGMA_WINDOW, min_periods=30)
+                .std()
+            )
+
         # 向量化状态判断（替代慢速的 iterrows 循环）
         merged["state"] = self._determine_states_vectorized(merged)
 
@@ -297,6 +397,10 @@ class StateMachine:
         out_cols = ["date", "trend", "rs_momentum_percentile", "state"]
         if "rs_percentile" in merged.columns:
             out_cols.insert(2, "rs_percentile")
+        if "rs_momentum" in merged.columns:
+            out_cols.insert(2, "rs_momentum")
+        if "rs_momentum_cross_pct" in merged.columns:
+            out_cols.append("rs_momentum_cross_pct")
         return merged[out_cols]
 
     # ============================================================
@@ -391,6 +495,7 @@ class StateMachine:
 
                 # 获取RS分位值（从 state_series 中直接取，避免二次磁盘读取）
                 rs_percentile = row.get("rs_percentile") if "rs_percentile" in row.index else None
+                rs_cross = row.get("rs_momentum_cross_pct") if "rs_momentum_cross_pct" in row.index else None
 
                 results.append({
                     "sector_code": code,
@@ -399,6 +504,7 @@ class StateMachine:
                     "trend": row["trend"],
                     "rs_percentile": rs_percentile if rs_percentile is not None and not np.isnan(rs_percentile) else None,
                     "rs_momentum_percentile": row["rs_momentum_percentile"],
+                    "rs_momentum_cross_pct": rs_cross if rs_cross is not None and not (isinstance(rs_cross, float) and np.isnan(rs_cross)) else None,
                 })
 
             except Exception as e:

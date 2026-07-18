@@ -35,5 +35,9 @@ _test_*.py
 serveo_tunnel.sh
 start_dashboard.sh
 
+# Generated validation artifacts (module integrated into app; standalone build outputs not needed in repo)
+industry_state_review.html
+_report_data.json
+
 # Project
 .workbuddy/

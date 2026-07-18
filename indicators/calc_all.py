@@ -62,9 +62,16 @@ def calc_all_rs_indicators(parquet_store, sqlite_store):
     rs = RelativeStrength(parquet_store, sqlite_store)
     results = rs.calc_all_sectors_rs(window=250, lookback=5)
 
+    # 横截面排名：把全市场同日 RS 动量/分位排名写回每个板块，
+    # 供状态机识别「真正领跑市场」的板块，拦截「只和自己比」导致的加速冲顶假阳性。
+    cross_results = rs.calc_cross_sectional_ranks(results)
+
     success_count = 0
     for sector_code, df in results.items():
         try:
+            # 合并横截面排名列（按日期对齐，缺失日留空）
+            if sector_code in cross_results:
+                df = df.merge(cross_results[sector_code], on="date", how="left")
             safe_code = sector_code.replace(".", "_")
             output_path = RS_DIR / f"{safe_code}.parquet"
             df.to_parquet(output_path, index=False)

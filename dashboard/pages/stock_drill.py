@@ -1485,6 +1485,7 @@ def render():
         selected_sector_code, sector_label = _render_sector_picker(matching_df)
 
     if not selected_sector_code:
+        st.info("💡 请先在上方选择九宫格状态，然后选择一个行业板块，即可查看成分股详情。")
         return
 
     # ================================================================

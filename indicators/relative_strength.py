@@ -462,3 +462,70 @@ class RelativeStrength:
             f"批量RS计算完成: 成功={success_count}, 失败={fail_count}, 跳过={skip_count}"
         )
         return results
+
+    def calc_cross_sectional_ranks(
+        self, results: Dict[str, pd.DataFrame]
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        横截面排名（全市场）：把各板块「同一天」的 RS 动量 / RS 分位在全市场范围内排名。
+
+        解决的问题：原 rs_momentum_percentile 是板块「自身过去 250 日」的时间序列百分位，
+        板块跌了 250 天后小幅反弹，5 日 RS 斜率也会排到 90+ 分位，被误判为 ③加速冲顶。
+        横截面排名改为「今天这个板块的 RS 动量在全市场里排第几」，
+        反弹板块在弱市里只是全市场最弱的那个，排名低位 → 不会误判为领跑。
+
+        参数:
+            results: {sector_code: DataFrame}，需含 date / rs_momentum / rs_percentile 列
+
+        返回:
+            {sector_code: DataFrame[date, rs_momentum_cross_pct, rs_percentile_cross_pct]}
+            rs_momentum_cross_pct: 当日 RS 动量在全市场的横截面百分位（0-100，越高越领先）
+        """
+        logger.info("计算 RS 横截面排名（全市场）...")
+
+        def _build_panel(col: str) -> Optional[pd.DataFrame]:
+            frames = []
+            for code, df in results.items():
+                if df is None or df.empty or col not in df.columns:
+                    continue
+                sub = df[["date", col]].dropna().rename(columns={col: code})
+                frames.append(sub)
+            if not frames:
+                return None
+            panel = frames[0]
+            for f in frames[1:]:
+                panel = panel.merge(f, on="date", how="outer")
+            return panel.sort_values("date").reset_index(drop=True)
+
+        panel_mom = _build_panel("rs_momentum")
+        panel_pos = _build_panel("rs_percentile")
+
+        # 横截面排名：仅对板块列排名，排除 date 列（否则会与 Timestamp 比较报错）
+        ranked_mom = (
+            panel_mom[[c for c in panel_mom.columns if c != "date"]].rank(axis=1, pct=True) * 100
+            if panel_mom is not None else None
+        )
+        ranked_pos = (
+            panel_pos[[c for c in panel_pos.columns if c != "date"]].rank(axis=1, pct=True) * 100
+            if panel_pos is not None else None
+        )
+
+        out: Dict[str, pd.DataFrame] = {}
+        for code, df in results.items():
+            if df is None or df.empty:
+                continue
+            if panel_mom is not None and code in panel_mom.columns:
+                dates = panel_mom["date"]
+            elif panel_pos is not None and code in panel_pos.columns:
+                dates = panel_pos["date"]
+            else:
+                continue
+            row = {"date": dates}
+            if ranked_mom is not None and code in ranked_mom.columns:
+                row["rs_momentum_cross_pct"] = ranked_mom[code]
+            if ranked_pos is not None and code in ranked_pos.columns:
+                row["rs_percentile_cross_pct"] = ranked_pos[code]
+            out[code] = pd.DataFrame(row)
+
+        logger.info(f"RS 横截面排名计算完成: {len(out)} 个板块")
+        return out
