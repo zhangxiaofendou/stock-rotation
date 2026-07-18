@@ -188,24 +188,25 @@ def load_sector_kline(sector_code: str):
 
 
 def _trend_text(trend: str, badge) -> str:
-    """列表单元格用的趋势文本（彩色圆点 + 方向箭头，信息更突出）。
+    """列表单元格用的趋势文本（彩色圆点 + 方向箭头）。
 
-    配色遵循中国股市习惯：🔴 红=上涨 / 🟢 绿=下跌 / 🟡 黄=横盘(中性)；
-    横盘带角标时以 ↘/↗ 箭头表示穿越 20 日线的方向，并标注持续天数。
+    配色：🔴 红=上涨 / 🟢 绿=下跌 / 🟡 黄=横盘(中性)；
+    横盘整体为灰色，仅「箭头+天数」局部着色（金叉↗红 / 死叉↘绿），
+    用内联 <span> 实现单元格内局部高亮（配合 Styler escape=False 渲染）。
     """
     if trend == "上涨":
         return "🔴 上涨"
     if trend == "下跌":
         return "🟢 下跌"
-    # 横盘（中性，黄点）
+    # 横盘（中性，黄点；箭头+天数局部标色）
     try:
         b = int(badge)
     except (TypeError, ValueError):
         b = 0
-    if b < 0:
-        return f"🟡 横盘 ↘{abs(b)}天"
     if b > 0:
-        return f"🟡 横盘 ↗{b}天"
+        return f'🟡 横盘 <span style="color:#e23c3c;font-weight:700">↗{b}天</span>'
+    if b < 0:
+        return f'🟡 横盘 <span style="color:#16a34a;font-weight:700">↘{abs(b)}天</span>'
     return "🟡 横盘"
 
 
@@ -864,17 +865,11 @@ def render():
             colL, colR = st.columns([0.95, 1.05])
 
             with colL:
-                # 趋势列着色：金叉(↗)箭头+天数红色、死叉(↘)箭头+天数绿色；评分列保留 1 位小数
+                # 趋势列：整列灰色底，仅「箭头+天数」经单元格内 <span> 局部标色
+                # （金叉↗红 / 死叉↘绿）。format 需 escape=False 才能渲染 <span>。
                 def _trend_cell_color(col):
-                    styles = []
-                    for v in col:
-                        if isinstance(v, str) and "↗" in v:
-                            styles.append("color:#e23c3c;font-weight:700;")
-                        elif isinstance(v, str) and "↘" in v:
-                            styles.append("color:#16a34a;font-weight:700;")
-                        else:
-                            styles.append("")
-                    return styles
+                    # 整列默认灰色（横盘/上涨/下跌文字均为灰，箭头+天数由 span 覆盖）
+                    return ["color:#6b7280;" for _ in col]
 
                 num_cols = ["综合评分", "RS横截面(%)", "动量横截面(%)",
                             "RS时序分位(%)", "动量时序分位(%)"]
