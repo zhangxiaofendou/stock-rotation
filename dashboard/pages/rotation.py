@@ -188,19 +188,25 @@ def load_sector_kline(sector_code: str):
 
 
 def _trend_text(trend: str, badge) -> str:
-    """列表单元格用的趋势文本（含角标天数）"""
+    """列表单元格用的趋势文本（彩色圆点 + 方向箭头，信息更突出）。
+
+    配色遵循中国股市习惯：🔴 红=上涨 / 🟢 绿=下跌 / 🟡 黄=横盘(中性)；
+    横盘带角标时以 ↘/↗ 箭头表示穿越 20 日线的方向，并标注持续天数。
+    """
     if trend == "上涨":
-        return "↑ 上涨"
+        return "🔴 上涨"
     if trend == "下跌":
-        return "↓ 下跌"
-    # 横盘
-    if badge is None:
-        return "→ 横盘"
-    if badge < 0:
-        return f"→ 横盘 {badge}"
-    if badge > 0:
-        return f"→ 横盘 +{badge}"
-    return "→ 横盘"
+        return "🟢 下跌"
+    # 横盘（中性，黄点）
+    try:
+        b = int(badge)
+    except (TypeError, ValueError):
+        b = 0
+    if b < 0:
+        return f"🟡 横盘 ↘{abs(b)}天"
+    if b > 0:
+        return f"🟡 横盘 ↗{b}天"
+    return "🟡 横盘"
 
 
 def _render_state_badge(trend: str, badge, state: str):
@@ -868,7 +874,7 @@ def render():
                     width="stretch",
                     column_config={
                         "板块名称": st.column_config.TextColumn("板块名称", width="medium"),
-                        "趋势": st.column_config.TextColumn("趋势", width="small"),
+                        "趋势": st.column_config.TextColumn("趋势", width="medium"),
                         "九宫格状态": st.column_config.TextColumn("九宫格状态", width="medium"),
                         "综合评分": st.column_config.NumberColumn("综合评分", format="%.1f", width="small"),
                         "RS横截面(%)": st.column_config.NumberColumn("RS横截面(%)", format="%.1f", width="small"),
