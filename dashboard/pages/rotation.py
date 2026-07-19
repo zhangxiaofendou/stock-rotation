@@ -306,6 +306,7 @@ def _render_heatmap_clickable(state_df: pd.DataFrame):
         "④强转弱", "⑤中性震荡", "⑥弱转强",
         "⑦持续杀跌", "⑧下跌中继", "⑨底背离",
     ]
+    selected_state = st.session_state.get("rotation_hm_state")
 
     for row_start in range(0, len(grid), 3):
         columns = st.columns(3)
@@ -317,6 +318,14 @@ def _render_heatmap_clickable(state_df: pd.DataFrame):
             signal = get_state_signal(state_label)
             signal_color = get_state_signal_color(state_label)
             bg = STATE_BG_COLORS.get(state_label, "background-color:#F5F5F5;")
+            is_selected = state_label == selected_state
+            border = f"3px solid {color}" if is_selected else "1px solid #e0e0e0"
+            shadow = f"box-shadow:0 0 0 3px {color}33;" if is_selected else ""
+            selected_badge = (
+                f'<span style="display:inline-block; margin-left:5px; padding:2px 7px; border-radius:9px; '
+                f'background:{color}; color:#fff; font-size:10px; font-weight:700;">当前筛选</span>'
+                if is_selected else ""
+            )
             sector_lines = "<br>".join(sectors[:8])
             if len(sectors) > 8:
                 sector_lines += f"<br>...等{len(sectors)}个"
@@ -324,8 +333,8 @@ def _render_heatmap_clickable(state_df: pd.DataFrame):
             with column:
                 st.markdown(
                     f"""
-                    <div style="{bg} min-height:178px; padding:12px; border:1px solid #e0e0e0; border-radius:6px; text-align:center;">
-                      <div style="color:{color}; font-weight:700; font-size:14px;">{emoji} {state_label}</div>
+                    <div style="{bg} min-height:178px; padding:12px; border:{border}; border-radius:8px; text-align:center; {shadow}">
+                      <div style="color:{color}; font-weight:700; font-size:14px;">{emoji} {state_label}{selected_badge}</div>
                       <span style="display:inline-block; margin:5px 0 6px; padding:1px 10px; border-radius:10px; color:#fff; font-size:12px; font-weight:700; background:{signal_color};">{signal}</span>
                       <div style="color:{color}; font-size:22px; font-weight:700;">{len(subset)}</div>
                       <div style="color:#666; font-size:11px; line-height:1.45;">{sector_lines or '-'}</div>
@@ -334,9 +343,11 @@ def _render_heatmap_clickable(state_df: pd.DataFrame):
                     unsafe_allow_html=True,
                 )
                 if st.button(
-                    f"查看 {state_label} 板块",
+                    "✓ 当前已选" if is_selected else f"查看 {state_label} 板块",
                     key=f"rotation_hm_select_{state_label}",
+                    type="primary" if is_selected else "secondary",
                     width="stretch",
+                    disabled=is_selected,
                 ):
                     st.session_state["rotation_hm_state"] = state_label
                     st.session_state["rotation_merge_filter"] = "🎯 按九宫格状态筛选"
