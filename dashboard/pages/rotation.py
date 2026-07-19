@@ -5,7 +5,6 @@
 """
 
 import streamlit as st
-import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
@@ -292,103 +291,67 @@ def _render_kline_chart(kline_df: pd.DataFrame, sector_name: str):
     st.plotly_chart(fig, width="stretch")
 
 
-def _render_heatmap_clickable(state_df: pd.DataFrame, key: str = "heatmap_clickable"):
-    """渲染可点击的九宫格热力图（基于 streamlit.components 双向通信）。
+def _render_heatmap_clickable(state_df: pd.DataFrame):
+    """渲染九宫格热力图及原生筛选按钮。
 
-    返回用户点击方块对应的状态名（str），未点击返回 None。
-    点击方块即等价于「按九宫格状态筛选」，用于驱动下方板块详情联动。
+    `components.html` 只能嵌入 iframe，无法向 Python 回传点击事件；因此每个格子
+    使用 Streamlit 原生按钮触发筛选，确保云端与本地都可稳定联动板块详情。
     """
     if state_df is None or state_df.empty:
         st.warning("暂无数据")
-        return None
+        return
 
-    # 九宫格定义
     grid = [
-        (0, 0, "①领涨减速"), (0, 1, "②稳健上行"), (0, 2, "③加速冲顶"),
-        (1, 0, "④强转弱"),   (1, 1, "⑤中性震荡"), (1, 2, "⑥弱转强"),
-        (2, 0, "⑦持续杀跌"), (2, 1, "⑧下跌中继"), (2, 2, "⑨底背离"),
+        "①领涨减速", "②稳健上行", "③加速冲顶",
+        "④强转弱", "⑤中性震荡", "⑥弱转强",
+        "⑦持续杀跌", "⑧下跌中继", "⑨底背离",
     ]
 
-    # 统计每个格子的板块
-    grid_data = {}
-    for _, _, state_label in grid:
-        subset = state_df[state_df["state"] == state_label]
-        grid_data[state_label] = {
-            "count": len(subset),
-            "sectors": list(subset["sector_name"].values) if len(subset) > 0 else [],
-        }
-
-    # 构建单元格（可点击：onclick 回传 data-state）
-    cells_html = ""
-    for row in range(3):
-        cells_html += "<tr>"
-        for col in range(3):
-            state_label = [g[2] for g in grid if g[0] == row and g[1] == col][0]
-            data = grid_data[state_label]
+    for row_start in range(0, len(grid), 3):
+        columns = st.columns(3)
+        for column, state_label in zip(columns, grid[row_start:row_start + 3]):
+            subset = state_df[state_df["state"] == state_label]
+            sectors = list(subset["sector_name"].values)
             color = STATE_COLORS.get(state_label, "#9E9E9E")
             emoji = STATE_EMOJI.get(state_label, "")
             signal = get_state_signal(state_label)
             signal_color = get_state_signal_color(state_label)
             bg = STATE_BG_COLORS.get(state_label, "background-color:#F5F5F5;")
+            sector_lines = "<br>".join(sectors[:8])
+            if len(sectors) > 8:
+                sector_lines += f"<br>...等{len(sectors)}个"
 
-            sectors_html = "<br>".join(data["sectors"][:8])
-            if len(data["sectors"]) > 8:
-                sectors_html += f"<br>...等{len(data['sectors'])}个"
+            with column:
+                st.markdown(
+                    f"""
+                    <div style="{bg} min-height:178px; padding:12px; border:1px solid #e0e0e0; border-radius:6px; text-align:center;">
+                      <div style="color:{color}; font-weight:700; font-size:14px;">{emoji} {state_label}</div>
+                      <span style="display:inline-block; margin:5px 0 6px; padding:1px 10px; border-radius:10px; color:#fff; font-size:12px; font-weight:700; background:{signal_color};">{signal}</span>
+                      <div style="color:{color}; font-size:22px; font-weight:700;">{len(subset)}</div>
+                      <div style="color:#666; font-size:11px; line-height:1.45;">{sector_lines or '-'}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+                if st.button(
+                    f"查看 {state_label} 板块",
+                    key=f"rotation_hm_select_{state_label}",
+                    width="stretch",
+                ):
+                    st.session_state["rotation_hm_state"] = state_label
+                    st.session_state["rotation_merge_filter"] = "🎯 按九宫格状态筛选"
+                    st.rerun()
 
-            cells_html += f"""
-            <td class="hm-cell" style="{bg}" data-state="{state_label}" onclick="hmClick(this)" title="点击按 {state_label} 筛选">
-                <div class="state-name" style="color:{color};">{emoji} {state_label}</div>
-                <div class="signal-pill" style="background-color:{signal_color};">{signal}</div>
-                <div class="count" style="color:{color};">{data['count']}</div>
-                <div class="sectors">{sectors_html or '-'}</div>
-            </td>
-            """
-        cells_html += "</tr>"
-
-    # 信号图例
     legend_items = []
     for item in get_signal_legend():
-        states = "、".join(s[1:] for s in item["states"])  # 去圆圈数字前缀
+        states = "、".join(s[1:] for s in item["states"])
         legend_items.append(
             f'<span style="display:inline-block;margin:6px 14px 6px 0;font-size:13px;color:#333;">'
             f'<span style="display:inline-block;padding:1px 9px;border-radius:10px;color:#fff;'
             f'font-weight:700;background-color:{item["color"]};">{item["signal"]}</span>'
             f' <span style="color:#666;">{item["desc"]}（{states}）</span></span>'
         )
-    legend_html = '<div style="margin-top:10px;line-height:1.8;">' + "".join(legend_items) + "</div>"
-
-    # 模板用普通字符串，{cells} 占位由 .replace 填充，避免与 CSS/JS 的大括号冲突
-    template = """
-    <style>
-    .hm-grid { width:100%; border-collapse:separate; border-spacing:6px; table-layout:fixed; }
-    .hm-cell { padding:12px; text-align:center; vertical-align:top; border:1px solid #e0e0e0;
-               border-radius:6px; cursor:pointer; transition:box-shadow .12s; }
-    .hm-cell:hover { box-shadow:0 0 0 3px #FF6F00 inset; }
-    .hm-cell .state-name { font-weight:bold; font-size:14px; margin-bottom:4px; }
-    .hm-cell .signal-pill { display:inline-block; margin:4px 0 6px; padding:1px 10px;
-               border-radius:10px; font-size:12px; font-weight:700; color:#fff; }
-    .hm-cell .count { font-size:22px; font-weight:bold; margin-bottom:4px; }
-    .hm-cell .sectors { font-size:11px; color:#666; line-height:1.4; }
-    </style>
-    <table class="hm-grid">{cells}</table>
-    <script>
-    function hmSet(v){
-        if (window.Streamlit && window.Streamlit.setComponentValue) {
-            window.Streamlit.setComponentValue(v);
-        } else if (window.parent && window.parent.Streamlit && window.parent.Streamlit.setComponentValue) {
-            window.parent.Streamlit.setComponentValue(v);
-        }
-    }
-    function hmClick(el){
-        var s = el.getAttribute('data-state');
-        hmSet(s);
-    }
-    hmSet(null);
-    </script>
-    """
-    html = template.replace("{cells}", cells_html) + legend_html
-
-    return components.html(html, height=540, scrolling=True)
+    st.markdown("".join(legend_items), unsafe_allow_html=True)
 
 
 
@@ -580,16 +543,8 @@ def render():
         st.subheader("九宫格板块分布热力图")
         st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向　·　点击方块按状态筛选板块")
 
-        clicked = _render_heatmap_clickable(state_df, key="rotation_hm")
-        # 仅接受非空字符串：防御 components.html 在不同 Streamlit 版本下
-        # 首次回传时可能返回 None / True / 0 等非标值，避免脏值进 session_state
-        if isinstance(clicked, str) and clicked:
-            st.session_state["rotation_hm_state"] = clicked
-        selected_state = st.session_state.get("rotation_hm_state", None)
-        # 防御：清理老 session 中残留的非字符串脏值
-        if not isinstance(selected_state, str):
-            st.session_state["rotation_hm_state"] = None
-            selected_state = None
+        _render_heatmap_clickable(state_df)
+        selected_state = st.session_state.get("rotation_hm_state")
 
         if selected_state:
             n = int((state_df["state"] == selected_state).sum())
