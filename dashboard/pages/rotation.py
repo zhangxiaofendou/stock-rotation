@@ -33,6 +33,7 @@ from dashboard.components.drill_pickers import (
 from dashboard.pages.stock_drill import render as render_stock_drill
 from dashboard.components.nav_state import persistent_tabs
 from signal_tracker.performance import get_sector_signal_summary
+from ai.consensus import compute_sector_consensus
 
 # 状态颜色映射
 STATE_BG_COLORS = {
@@ -140,12 +141,89 @@ def _render_confirmation_risk_panel(selected_code: str, sector_state: str, score
             st.metric("镜像确认", "不适用")
             st.caption("该状态不属于镜像交叉验证范围。")
 
+    # ---- AI：研报/新闻共识（纯规则，PRD §7.4 / §5.6.5）----
+    _render_research_consensus_card(selected_code)
+
     with st.expander("指标口径与当前缺口"):
         st.markdown(
             "- **拥挤度**：成交额分位（60%）与成交量分位（40%）的近 250 个交易日加权结果。\n"
             "- **镜像确认**：只在关联板块组内检查 ④↔⑥、③↔⑦ 的对立状态。\n"
-            "- **尚未接入**：真实板块资金流、分化度、研报共识；数据未形成稳定批量口径时不以默认中性值替代。"
+            "- **研报/新闻共识**：评级上调潮、目标价上调幅度、覆盖券商数变化、评级分歧度，"
+            "由 `research_reports` 结构化存储的研报经纯规则计算（每条结论可追溯原文）；"
+            "无研报数据时显示「暂无」。\n"
+            "- **尚未接入**：真实板块资金流、分化度；数据未形成稳定批量口径时不以默认中性值替代。"
         )
+
+
+@st.cache_data(ttl=3600)
+def _cached_consensus(sector_code: str):
+    """缓存单板块共识计算（1h TTL）。"""
+    return compute_sector_consensus(sector_code)
+
+
+def _render_research_consensus_card(sector_code: str):
+    """在「确认与风险因子」中展示研报/新闻共识（辅助确认，不改变主信号）。"""
+    st.markdown("---")
+    st.markdown("##### 🤖 研报 / 新闻共识")
+    st.caption("纯规则计算（PRD §7.4），仅作辅助确认；不改变九宫格状态、综合评分或操作建议。")
+
+    try:
+        c = _cached_consensus(sector_code)
+    except Exception as e:
+        st.warning(f"共识计算失败：{e}")
+        return
+
+    if not c.get("has_data"):
+        # 云端自初始化：首次访问时写入示例数据，保证开箱即用
+        try:
+            from data.runtime_init import ensure_ai_data
+            seed = ensure_ai_data()
+            if not seed.get("skipped"):
+                # 绕过缓存取最新结果（刚写入示例数据）
+                c = compute_sector_consensus(sector_code)
+        except Exception:
+            pass
+    if not c.get("has_data"):
+        st.info("该板块暂无研报/新闻数据。导入真实研报后（或云端自初始化示例数据）此处展示共识信号。")
+        return
+
+    # 方向 + 强度
+    direction = c["direction"]
+    strength = c["strength"]
+    dir_color = "#2E7D32" if direction == "看多" else ("#C62828" if direction == "看空" else "#78909C")
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        st.metric("研报共识", direction, help=f"综合强度 {strength:.0%}")
+        st.markdown(
+            f"<span style='font-weight:700;color:{dir_color};'>● {direction}（强度 {strength:.0%}）</span>",
+            unsafe_allow_html=True,
+        )
+    with col_b:
+        # 四个共识信号 chips
+        chips = []
+        chips.append(f"评级上调 {c['upgrade_count']} 家" + (" ✅潮" if c["upgrade_wave"] else ""))
+        if c["target_up_median_pct"] is not None:
+            chips.append(f"目标价↑中位数 {c['target_up_median_pct']:+.1f}%")
+        chips.append(f"覆盖券商 {'+'+str(c['coverage_change']) if c['coverage_change']>=0 else str(c['coverage_change'])}"
+                     + (" 🔥" if c["coverage_surge"] else ""))
+        chips.append(f"评级分歧：{c['divergence']}")
+        if c.get("news_net", 0) != 0:
+            chips.append(f"新闻净情绪 {'+'+str(c['news_net']) if c['news_net']>0 else str(c['news_net'])}")
+        st.caption(" ｜ ".join(chips))
+
+    # 可追溯证据
+    with st.expander(f"📑 近期研报证据（{c['report_count']} 篇，可追溯原文）"):
+        for ev in c.get("evidence", [])[:12]:
+            chg = ev.get("rating_change") or "—"
+            tgt = f"目标价{ev['target_change_pct']:+.1f}%" if ev.get("target_change_pct") is not None else ""
+            line = (
+                f"**{ev.get('broker')}** ｜ {ev.get('rating')}（{chg}） ｜ {ev.get('coverage_date')} ｜ {tgt}"
+            )
+            st.markdown(line)
+            if ev.get("core_view"):
+                st.caption(ev["core_view"])
+            if ev.get("source_url"):
+                st.markdown(f"[原文链接]({ev['source_url']})")
 
 
 def _render_score_breakdown(score_row: pd.Series):

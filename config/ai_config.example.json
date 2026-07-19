@@ -1,0 +1,6 @@
+{
+  "comment": "AI 模块大模型配置（可选）。复制为 ai_config.json 并填入真实值；该文件已被 .gitignore 忽略，不会入库。未配置时所有大模型功能自动降级为规则/正则兜底。",
+  "api_key": "sk-xxxx",
+  "api_base": "https://api.openai.com/v1",
+  "model": "gpt-4o-mini"
+}

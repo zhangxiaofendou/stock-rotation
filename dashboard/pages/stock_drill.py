@@ -23,6 +23,7 @@ from config.sector_map import SW_LEVEL2_MAP, get_sector_name
 from config.logger import get_logger
 from model.state_machine import StateMachine
 from model.transition import TransitionRules
+from ai.multi_factor import rank_stocks
 from dashboard.components.drill_pickers import (
     load_all_sector_states,
     detect_state_transitions,
@@ -842,7 +843,8 @@ def _render_mini_kline(stock_code: str, stock_name: str):
     st.plotly_chart(fig, width="stretch")
 
 
-def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_data: bool = True):
+def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_data: bool = True,
+                          sector_code: str = None):
     """双重漏斗选股：资金面 Top N% → 基本面 Top K 只，顺序筛选"""
     if merged_df.empty:
         st.warning("暂无选股数据")
@@ -1026,6 +1028,60 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_dat
                 """,
                 unsafe_allow_html=True,
             )
+
+    # ---- AI：ML 多因子排序（排序辅助，PRD §5.6.3 / §5.6.5）----
+    _ml_names = dict(zip(final_pool["stock_code"], final_pool["stock_name"])) if "stock_name" in final_pool.columns else {}
+    _render_ml_ranking(final_pool["stock_code"].tolist(), sector_code=sector_code, names=_ml_names)
+
+
+def _render_ml_ranking(stock_codes: list, sector_code: str = None, names: dict = None):
+    """ML 多因子排序辅助（PRD §5.6.3 / §5.6.5）。
+
+    仅对本地已有行情缓存的个股排序，避免触发网络拉取；作为排序辅助参考，
+    不生成交易指令。当前本地个股样本有限，走横截面 z-score 透明合成路径。
+    """
+    from config.settings import PARQUET_DIR
+    stock_dir = os.path.join(str(PARQUET_DIR), "stock_hist")
+    have = [c for c in (stock_codes or []) if os.path.exists(
+        os.path.join(stock_dir, f"{str(c).zfill(6)}.parquet"))]
+    if not have:
+        st.info("🤖 ML 多因子排序：候选个股暂无本地行情缓存，暂无法排序"
+                "（需在每日管线中补充个股历史数据后启用）。")
+        return
+
+    names = names or {}
+    with st.spinner("🤖 正在计算多因子排序..."):
+        res = rank_stocks(have, sector_code=sector_code, names=names)
+
+    st.markdown("---")
+    st.markdown("##### 🤖 ML 多因子排序（辅助参考）")
+    st.caption((res.get("note") or "") + " ｜ 仅排序辅助，非交易指令。")
+    df = res.get("ranked")
+    if df is None or df.empty:
+        st.info("无足够数据生成排序。")
+        return
+
+    show = ["rank", "stock_code", "stock_name", "score_0_100"]
+    zmap = {
+        "momentum_20d_z": "动量z", "recent_strength_z": "强度z",
+        "volume_trend_z": "量能z", "low_vol_z": "低波动z",
+        "low_drawdown_z": "低回撤z", "rs_sector_z": "相对板块z",
+    }
+    for zc in zmap:
+        if zc in df.columns:
+            show.append(zc)
+    st.dataframe(
+        df[show].rename(columns={
+            "rank": "排名", "stock_code": "代码", "stock_name": "名称", "score_0_100": "综合分", **zmap,
+        }),
+        column_config={"综合分": st.column_config.NumberColumn("综合分", format="%.1f")},
+        width="stretch",
+        hide_index=True,
+    )
+    st.caption(
+        f"模型模式：{res.get('model_mode')} ｜ 已排序 {res.get('n_ranked')}/{res.get('n_total')} 只"
+        f"（仅含本地有行情者）；各 z 列为横截面标准化，越大越好。"
+    )
 
 
 def _render_fund_flow_detail(merged_df: pd.DataFrame):
@@ -1534,7 +1590,8 @@ def render(selected_sector_code=None, sector_label="", embedded=False):
         _render_leaders(merged_df, sector_label)
 
     with tab3:
-        _render_stock_funnel(merged_df, sector_label, has_spot_data=(spot_df is not None and not spot_df.empty))
+        _render_stock_funnel(merged_df, sector_label, has_spot_data=(spot_df is not None and not spot_df.empty),
+                             sector_code=selected_sector_code)
 
     with tab4:
         st.subheader("📈 个股详情查询")

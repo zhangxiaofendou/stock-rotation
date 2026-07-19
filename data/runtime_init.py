@@ -65,3 +65,17 @@ def ensure_signal_performance(force: bool = False) -> dict:
         "perf": int(summary.get("written", 0)),
         "benchmark_ok": benchmark_ok,
     }
+
+
+def ensure_ai_data() -> dict:
+    """确保研报/新闻示例数据已写入（云端自初始化）。
+
+    云端没有 research_reports 表数据，AI 共识卡片首次访问时用已提交代码里的
+    示例数据自初始化，使「研报/新闻共识」开箱即用；本地已有数据则跳过。
+    """
+    try:
+        from ai.ingest import ensure_ai_seed
+        return ensure_ai_seed()
+    except Exception as e:
+        logger.warning("AI 示例数据初始化失败: %s", e)
+        return {"skipped": False, "research": 0, "news": 0, "error": str(e)}
