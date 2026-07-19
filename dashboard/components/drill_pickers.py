@@ -24,6 +24,8 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
+from data.storage.parquet_store import ParquetStore
+from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from config.logger import get_logger
 
@@ -35,7 +37,8 @@ logger = get_logger(__name__)
 # ============================================================
 @st.cache_resource
 def get_state_machine():
-    return StateMachine()
+    """创建带数据存储的状态机，供状态切换检测读取历史 RS/趋势序列。"""
+    return StateMachine(ParquetStore(), SQLiteStore())
 
 
 # ============================================================
@@ -83,7 +86,10 @@ def load_all_sector_states():
 
 
 def detect_state_transitions(all_states_df, days_back=5):
-    """检测最近N天内的状态切换
+    """检测最近 N 个交易日内的状态切换。
+
+    `days_back` 按状态序列末尾的交易日计数，自动覆盖周末和节假日；
+    因而「最近5天」展示的是最近 5 个交易日的切换，而非自然日。
 
     返回:
         pd.DataFrame: sector_code, sector_name, from_state, to_state,
@@ -116,7 +122,8 @@ def detect_state_transitions(all_states_df, days_back=5):
                         "state_change": f"{states[i-1]} → {states[i]}",
                         "date": dates[i],
                     })
-        except Exception:
+        except Exception as e:
+            logger.warning(f"检测板块 {code} 状态切换失败: {e}")
             continue
 
     if not transitions:
@@ -221,10 +228,11 @@ def render_transition_picker(all_states_df, key="transition_picker"):
     """第一层：按状态切换筛选 → 返回 (选定切换类型, 匹配板块DataFrame)"""
     st.markdown("#### 🔄 按状态切换筛选")
 
-    trans_df = detect_state_transitions(all_states_df, days_back=5)
+    days_back = 5
+    trans_df = detect_state_transitions(all_states_df, days_back=days_back)
 
     if trans_df.empty:
-        st.info("最近5天没有板块发生状态切换")
+        st.info(f"最近 {days_back} 个交易日没有板块发生状态切换")
         st.metric("全部板块", f"{len(all_states_df)} 个")
         return None, None
 
@@ -238,7 +246,7 @@ def render_transition_picker(all_states_df, key="transition_picker"):
     ).reset_index()
     transition_types = transition_types.sort_values("count", ascending=False)
 
-    st.markdown("##### 最近5天状态切换统计")
+    st.markdown(f"##### 最近 {days_back} 个交易日状态切换统计")
 
     for _, row in transition_types.iterrows():
         state_chg = row["state_change"]
