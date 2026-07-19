@@ -48,7 +48,10 @@ def ensure_signal_performance(force: bool = False) -> dict:
         logger.warning("基准更新失败（超额收益将留空，可待每日管线补全）: %s", e)
         benchmark_ok = False
 
-    # 2) 信号事件账本（状态机从已提交 parquet 算出，无网络依赖）
+    # 2) 板块元数据（云端首次部署 sectors 表为空，signal_events 外键会失败）
+    sqlite.ensure_sectors()
+
+    # 3) 信号事件账本（状态机从已提交 parquet 算出，无网络依赖）
     from data.daily_pipeline import sync_signal_events
     sync_signal_events()
 

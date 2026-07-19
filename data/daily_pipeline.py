@@ -157,6 +157,8 @@ def sync_signal_events():
     """将重算后的状态序列同步到共享信号事件账本。"""
     parquet = ParquetStore()
     sqlite = SQLiteStore()
+    # 元数据表可能为空（新环境/云端），先确保 sectors 存在，避免外键约束失败
+    sqlite.ensure_sectors()
     ledger = SignalEventLedger(sqlite, StateMachine(parquet, sqlite))
     summary = ledger.sync()
     logger.info(

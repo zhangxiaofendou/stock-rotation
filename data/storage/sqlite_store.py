@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Optional, List, Dict, Tuple
 import pandas as pd
 
+from config.sector_map import SW_LEVEL1_MAP, SW_LEVEL2_MAP
 from config.logger import get_logger
 from config.settings import SQLITE_DB_PATH
 
@@ -214,6 +215,23 @@ class SQLiteStore:
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}")
             raise
+
+    def ensure_sectors(self) -> int:
+        """从本地 sector_map 初始化 sectors 表（幂等）。
+
+        云端部署没有 sectors 元数据，但 signal_events/signal_performance 等表依赖
+        sectors(code) 外键。该方法无需网络，仅从 config.sector_map 重建基础板块
+        信息。返回写入/更新的行数。
+        """
+        rows = []
+        # 申万一级
+        for code, name in SW_LEVEL1_MAP.items():
+            rows.append((code, name, 1, None, None, None))
+        # 申万二级
+        for code, (name, parent_code, parent_name) in SW_LEVEL2_MAP.items():
+            rows.append((code, name, 2, parent_code, parent_name, None))
+        self.insert_sectors_batch(rows)
+        return len(rows)
 
     # ============================================================
     # 板块信息 CRUD
