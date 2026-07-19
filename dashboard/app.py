@@ -157,7 +157,7 @@ def main():
         from dashboard.components.nav_state import persistent_radio
         page = persistent_radio(
             "page",
-            ["市场温度计", "板块轮动监控"],
+            ["市场温度计", "板块轮动监控", "持仓管理"],
             label="导航菜单",
         )
 
@@ -181,6 +181,9 @@ def main():
         render()
     elif page == "板块轮动监控":
         from dashboard.pages.rotation import render
+        render()
+    elif page == "持仓管理":
+        from dashboard.pages.portfolio import render
         render()
 
 

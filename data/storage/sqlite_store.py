@@ -117,6 +117,38 @@ CREATE TABLE IF NOT EXISTS signal_events (
     FOREIGN KEY (sector_code) REFERENCES sectors(code)
 );
 
+-- 用户持仓：仅保存当前仍持有的真实头寸；成交明细保存在 portfolio_transactions。
+-- 平均成本由成交服务按买入加权计算，卖出不改变剩余头寸成本。
+CREATE TABLE IF NOT EXISTS portfolio_positions (
+    security_code TEXT PRIMARY KEY,
+    security_name TEXT NOT NULL,
+    asset_type TEXT NOT NULL DEFAULT 'stock',
+    sector_code TEXT,
+    sector_name TEXT,
+    quantity REAL NOT NULL CHECK(quantity > 0),
+    avg_cost REAL NOT NULL CHECK(avg_cost >= 0),
+    opened_date TEXT,
+    target_weight REAL,
+    stop_loss REAL,
+    note TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
+-- 用户实际成交/调账日志：不被重算或覆盖，作为持仓事实的审计来源。
+CREATE TABLE IF NOT EXISTS portfolio_transactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    trade_date TEXT NOT NULL,
+    security_code TEXT NOT NULL,
+    security_name TEXT NOT NULL,
+    side TEXT NOT NULL CHECK(side IN ('BUY', 'SELL', 'ADJUST')),
+    quantity REAL NOT NULL CHECK(quantity > 0),
+    price REAL NOT NULL CHECK(price >= 0),
+    fee REAL NOT NULL DEFAULT 0 CHECK(fee >= 0),
+    note TEXT,
+    created_at TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_sector_stocks_sector ON sector_stocks(sector_code);
 CREATE INDEX IF NOT EXISTS idx_sector_stocks_stock ON sector_stocks(stock_code);
@@ -125,6 +157,7 @@ CREATE INDEX IF NOT EXISTS idx_trade_calendar_date ON trade_calendar(trade_date)
 CREATE INDEX IF NOT EXISTS idx_sector_groups_group ON sector_groups(group_name);
 CREATE INDEX IF NOT EXISTS idx_signal_events_sector_date ON signal_events(sector_code, event_date DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_events_path_date ON signal_events(from_state, to_state, event_date DESC);
+CREATE INDEX IF NOT EXISTS idx_portfolio_transactions_security_date ON portfolio_transactions(security_code, trade_date DESC);
 """
 
 
@@ -407,6 +440,130 @@ class SQLiteStore:
                 ORDER BY data_type, data_key
             """, conn, params=(f'-{stale_hours} hours',))
             return df
+        finally:
+            conn.close()
+
+    # ============================================================
+    # 用户持仓账本
+    # ============================================================
+    def get_portfolio_positions(self) -> pd.DataFrame:
+        """返回当前持仓，按创建时间倒序。"""
+        conn = self._get_conn()
+        try:
+            return pd.read_sql_query(
+                "SELECT * FROM portfolio_positions ORDER BY updated_at DESC, security_code",
+                conn,
+            )
+        finally:
+            conn.close()
+
+    def get_portfolio_transactions(self, security_code: str = None, limit: int = 200) -> pd.DataFrame:
+        """返回真实操作日志；可按证券代码筛选。"""
+        conn = self._get_conn()
+        try:
+            sql = "SELECT * FROM portfolio_transactions"
+            params = []
+            if security_code:
+                sql += " WHERE security_code = ?"
+                params.append(security_code)
+            sql += " ORDER BY trade_date DESC, id DESC LIMIT ?"
+            params.append(int(limit))
+            return pd.read_sql_query(sql, conn, params=params)
+        finally:
+            conn.close()
+
+    def record_portfolio_transaction(
+        self,
+        trade_date: str,
+        security_code: str,
+        security_name: str,
+        side: str,
+        quantity: float,
+        price: float,
+        fee: float = 0.0,
+        note: str = None,
+        asset_type: str = "stock",
+        sector_code: str = None,
+        sector_name: str = None,
+        target_weight: float = None,
+        stop_loss: float = None,
+    ) -> None:
+        """原子记录一笔实际成交并更新当前持仓。
+
+        BUY 按成交金额（含费用）更新加权平均成本；SELL 只减少数量；ADJUST
+        用于数量调整且不改变成本。卖出超过持仓会拒绝，避免账本出现负数。
+        """
+        side = str(side).upper()
+        if side not in {"BUY", "SELL", "ADJUST"}:
+            raise ValueError("side 必须是 BUY、SELL 或 ADJUST")
+        quantity, price, fee = float(quantity), float(price), float(fee)
+        if quantity <= 0 or price < 0 or fee < 0:
+            raise ValueError("数量必须大于 0，价格和费用不能为负数")
+
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN")
+            row = conn.execute(
+                "SELECT * FROM portfolio_positions WHERE security_code = ?",
+                (security_code,),
+            ).fetchone()
+            current_qty = float(row["quantity"]) if row else 0.0
+            current_cost = float(row["avg_cost"]) if row else 0.0
+
+            if side == "SELL" and quantity > current_qty + 1e-8:
+                raise ValueError(f"卖出数量 {quantity:g} 超过当前持仓 {current_qty:g}")
+            if side == "ADJUST" and not row:
+                raise ValueError("调整持仓前需先存在当前头寸")
+
+            if side == "BUY":
+                new_qty = current_qty + quantity
+                new_cost = ((current_qty * current_cost) + (quantity * price) + fee) / new_qty
+            elif side == "SELL":
+                new_qty = current_qty - quantity
+                new_cost = current_cost
+            else:
+                new_qty = quantity
+                new_cost = current_cost
+
+            conn.execute(
+                """
+                INSERT INTO portfolio_transactions
+                    (trade_date, security_code, security_name, side, quantity, price, fee, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (trade_date, security_code, security_name, side, quantity, price, fee, note),
+            )
+
+            if new_qty <= 1e-8:
+                conn.execute("DELETE FROM portfolio_positions WHERE security_code = ?", (security_code,))
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO portfolio_positions
+                        (security_code, security_name, asset_type, sector_code, sector_name,
+                         quantity, avg_cost, opened_date, target_weight, stop_loss, note, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                    ON CONFLICT(security_code) DO UPDATE SET
+                        security_name = excluded.security_name,
+                        asset_type = excluded.asset_type,
+                        sector_code = COALESCE(excluded.sector_code, portfolio_positions.sector_code),
+                        sector_name = COALESCE(excluded.sector_name, portfolio_positions.sector_name),
+                        quantity = excluded.quantity,
+                        avg_cost = excluded.avg_cost,
+                        target_weight = COALESCE(excluded.target_weight, portfolio_positions.target_weight),
+                        stop_loss = COALESCE(excluded.stop_loss, portfolio_positions.stop_loss),
+                        note = COALESCE(excluded.note, portfolio_positions.note),
+                        updated_at = datetime('now', 'localtime')
+                    """,
+                    (
+                        security_code, security_name, asset_type, sector_code, sector_name,
+                        new_qty, new_cost, trade_date, target_weight, stop_loss, note,
+                    ),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         finally:
             conn.close()
 
