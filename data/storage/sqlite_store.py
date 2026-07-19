@@ -117,6 +117,31 @@ CREATE TABLE IF NOT EXISTS signal_events (
     FOREIGN KEY (sector_code) REFERENCES sectors(code)
 );
 
+-- 信号后续表现账本：冻结每个状态切换事件在发出后的实际表现。
+-- 由 signal_tracker 在管线完成后补全，供信号绩效、失效预警与历史回放复用，
+-- 与 signal_events（事实源）分离，重算口径不影响原始事件记录。
+CREATE TABLE IF NOT EXISTS signal_performance (
+    event_date TEXT NOT NULL,           -- 与 signal_events 对应的事件交易日
+    sector_code TEXT NOT NULL,
+    sector_name TEXT,
+    from_state TEXT NOT NULL,           -- 信号源状态（判定成败的基准）
+    to_state TEXT NOT NULL,             -- 进入的目标状态（用户视角的“信号类型”）
+    signal_direction TEXT,              -- BUY/SELL/HOLD/AVOID/NEUTRAL（基于 to_state 的通用方向）
+    price_t0 REAL,                      -- 信号日收盘价（当时价格）
+    base_price REAL,                    -- T+1 开盘价（模拟次日进场基准）
+    close_t5 REAL,                      -- T+5 交易日收盘价
+    close_t20 REAL,                     -- T+20 交易日收盘价
+    state_t5 TEXT,                      -- T+5 交易日九宫格状态
+    state_t20 TEXT,                     -- T+20 交易日九宫格状态
+    return_t5 REAL,                     -- (close_t5 - base_price) / base_price
+    return_t20 REAL,                    -- (close_t20 - base_price) / base_price
+    excess_t20 REAL,                    -- return_t20 - 同期沪深300收益（超额收益）
+    outcome TEXT,                       -- success / failure / neutral
+    evaluated_at TEXT DEFAULT (datetime('now', 'localtime')),
+    PRIMARY KEY (event_date, sector_code),
+    FOREIGN KEY (sector_code) REFERENCES sectors(code)
+);
+
 -- 用户持仓：仅保存当前仍持有的真实头寸；成交明细保存在 portfolio_transactions。
 -- 平均成本由成交服务按买入加权计算，卖出不改变剩余头寸成本。
 CREATE TABLE IF NOT EXISTS portfolio_positions (
@@ -157,6 +182,8 @@ CREATE INDEX IF NOT EXISTS idx_trade_calendar_date ON trade_calendar(trade_date)
 CREATE INDEX IF NOT EXISTS idx_sector_groups_group ON sector_groups(group_name);
 CREATE INDEX IF NOT EXISTS idx_signal_events_sector_date ON signal_events(sector_code, event_date DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_events_path_date ON signal_events(from_state, to_state, event_date DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_performance_path_date ON signal_performance(from_state, to_state, event_date DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_performance_date ON signal_performance(event_date DESC);
 CREATE INDEX IF NOT EXISTS idx_portfolio_transactions_security_date ON portfolio_transactions(security_code, trade_date DESC);
 """
 
@@ -639,6 +666,104 @@ class SQLiteStore:
         conn = self._get_conn()
         try:
             return pd.read_sql_query(sql, conn, params=params)
+        finally:
+            conn.close()
+
+    def upsert_signal_performance(self, rows: List[Tuple]) -> int:
+        """幂等写入信号后续表现，唯一键为（事件交易日、板块代码）。
+
+        每条 tuple 顺序为：event_date, sector_code, sector_name, from_state,
+        to_state, signal_direction, price_t0, base_price, close_t5, close_t20,
+        state_t5, state_t20, return_t5, return_t20, excess_t20, outcome。
+        重复评估会覆盖同一事实记录的后续表现，便于口径演进后重算。
+        """
+        if not rows:
+            return 0
+        conn = self._get_conn()
+        try:
+            conn.executemany("""
+                INSERT INTO signal_performance (
+                    event_date, sector_code, sector_name, from_state, to_state,
+                    signal_direction, price_t0, base_price, close_t5, close_t20,
+                    state_t5, state_t20, return_t5, return_t20, excess_t20, outcome,
+                    evaluated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                ON CONFLICT(event_date, sector_code) DO UPDATE SET
+                    sector_name=excluded.sector_name,
+                    from_state=excluded.from_state,
+                    to_state=excluded.to_state,
+                    signal_direction=excluded.signal_direction,
+                    price_t0=excluded.price_t0,
+                    base_price=excluded.base_price,
+                    close_t5=excluded.close_t5,
+                    close_t20=excluded.close_t20,
+                    state_t5=excluded.state_t5,
+                    state_t20=excluded.state_t20,
+                    return_t5=excluded.return_t5,
+                    return_t20=excluded.return_t20,
+                    excess_t20=excluded.excess_t20,
+                    outcome=excluded.outcome,
+                    evaluated_at=datetime('now', 'localtime')
+            """, rows)
+            conn.commit()
+            return len(rows)
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"写入信号后续表现失败: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def get_signal_performance(
+        self,
+        start: str = None,
+        end: str = None,
+        sector_code: str = None,
+        limit: int = None,
+    ) -> pd.DataFrame:
+        """查询信号后续表现账本，按事件日期倒序返回。"""
+        clauses, params = [], []
+        if start:
+            clauses.append("event_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("event_date <= ?")
+            params.append(end)
+        if sector_code:
+            clauses.append("sector_code = ?")
+            params.append(sector_code)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = "SELECT * FROM signal_performance" + where + " ORDER BY event_date DESC, sector_code"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        conn = self._get_conn()
+        try:
+            return pd.read_sql_query(sql, conn, params=params)
+        finally:
+            conn.close()
+
+    def count_signal_performance(self) -> int:
+        """返回已评估的信号后续表现记录数。"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute("SELECT COUNT(*) AS n FROM signal_performance").fetchone()
+            return int(row["n"]) if row else 0
+        finally:
+            conn.close()
+
+    def clear_signal_performance(self) -> int:
+        """清空信号后续表现账本（重算口径前调用）。返回删除记录数。"""
+        conn = self._get_conn()
+        try:
+            n = conn.execute("SELECT COUNT(*) AS n FROM signal_performance").fetchone()["n"]
+            conn.execute("DELETE FROM signal_performance")
+            conn.commit()
+            return int(n)
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"清空信号后续表现失败: {e}")
+            raise
         finally:
             conn.close()
 

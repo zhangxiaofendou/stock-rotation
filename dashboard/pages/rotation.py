@@ -32,6 +32,7 @@ from dashboard.components.drill_pickers import (
 )
 from dashboard.pages.stock_drill import render as render_stock_drill
 from dashboard.components.nav_state import persistent_tabs
+from signal_tracker.performance import get_sector_signal_summary
 
 # 状态颜色映射
 STATE_BG_COLORS = {
@@ -697,6 +698,58 @@ def render():
         # ================================================================
         # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
         # ================================================================
+@st.cache_data(ttl=3600)
+def _load_sector_perf():
+    """加载信号后续表现账本（内存缓存，供板块详情摘要复用）。"""
+    try:
+        return SQLiteStore().get_signal_performance()
+    except Exception:
+        return None
+
+
+def _fmt_pct_safe(value, digits: int = 1) -> str:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return "—"
+    return f"{value * 100:.{digits}f}%"
+
+
+def _render_sector_signal_summary(sector_code: str):
+    """回显该行业作为信号源的历史后验表现，并跳转信号绩效页。"""
+    perf = _load_sector_perf()
+    if perf is None or perf.empty:
+        return
+    try:
+        summary = get_sector_signal_summary(sector_code, perf_df=perf)
+    except Exception:
+        return
+    if not summary.get("has_data"):
+        return
+    st.subheader("📈 信号绩效摘要（历史后验）")
+    st.caption("该行业历史信号发出后的实际表现，仅供参考；完整明细与失效预警见「信号绩效」页。")
+    wr = summary["win_rate"]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("历史信号数", f"{summary['samples']}")
+    c2.metric("胜率", f"{wr * 100:.1f}%" if wr is not None else "—")
+    c3.metric("成功/失败", f"{summary['success']}/{summary['failure']}")
+    c4.metric("平均20日收益", _fmt_pct_safe(summary["avg_return_t20"]))
+    by_to = summary.get("by_to_state")
+    if by_to is not None and not by_to.empty:
+        disp = by_to.copy()
+        disp["胜率"] = disp["win_rate"].map(lambda x: f"{x * 100:.1f}%" if pd.notna(x) else "—")
+        disp["平均20日收益"] = disp["avg_return_t20"].map(lambda x: f"{x * 100:.1f}%" if pd.notna(x) else "—")
+        disp = disp.rename(columns={
+            "to_state": "进入状态", "samples": "样本", "success": "成功",
+            "failure": "失败", "neutral": "中性",
+        })
+        st.dataframe(
+            disp[["进入状态", "样本", "成功", "失败", "中性", "胜率", "平均20日收益"]],
+            hide_index=True, width="stretch",
+        )
+    if st.button("前往信号绩效页 →", key=f"goto_perf_{sector_code}"):
+        st.query_params["page"] = "信号绩效"
+        st.rerun()
+
+
     def _render_sector_detail(state_df, score_df, selected_code):
         """渲染选中板块的详情（当前状态卡片 + K线/RS/RS动量 + 状态历史）。
 
@@ -759,6 +812,9 @@ def render():
 
             # 辅助确认与风险：仅解释主信号，不改变九宫格和评分口径。
             _render_confirmation_risk_panel(selected_code, info["state"], _detail_score_row)
+
+            # 信号绩效摘要：仅回显该行业作为信号源的历史后验表现，不重算状态机。
+            _render_sector_signal_summary(selected_code)
 
         # ================================================================
         # K线图

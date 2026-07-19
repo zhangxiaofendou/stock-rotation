@@ -168,6 +168,26 @@ def sync_signal_events():
     return summary
 
 
+def enrich_signal_performance():
+    """补齐最近窗口内信号事件的后续表现，供信号绩效/失效预警/历史回放复用。
+
+    采用增量模式（默认仅处理最近 400 个交易日之后发生的事件），因为更早
+    事件的 T+20 表现已固定且不会变化；增量模式使每日管线开销可控。
+    首次上线或口径升级需全量历史时，单独运行 `python -m signal_tracker.tracker`。
+    """
+    try:
+        from signal_tracker.tracker import SignalTracker
+        since = (datetime.now() - timedelta(days=400)).strftime("%Y-%m-%d")
+        tracker = SignalTracker()
+        summary = tracker.enrich_events(since_date=since)
+        logger.info(
+            "信号后续表现补全完成：评估 %s，写入 %s，跳过 %s，失败 %s",
+            summary["evaluated"], summary["written"], summary["skipped"], len(summary["failed_sectors"]),
+        )
+    except Exception as e:
+        logger.error(f"信号后续表现补全失败: {e}")
+
+
 def run_module(mod: str) -> int:
     """以子进程运行一个 python -m 模块，捕获日志。返回 returncode。"""
     logger.info(f"▶ 执行 python -m {mod}")
@@ -215,6 +235,8 @@ def main():
         logger.info(f"数据已为最新交易日 {target} 收盘，无需更新（幂等跳过）。")
         # 即便行情和指标已是最新，也同步账本：首次上线、状态规则升级后可补齐历史事件。
         sync_signal_events()
+        # 同步账本后增量补全信号后续表现，保证绩效数据不滞后。
+        enrich_signal_performance()
         return
 
     # 非交易日但数据滞后：仍补跑到最新交易日收盘（如周六补周五数据），
@@ -235,6 +257,8 @@ def main():
     recompute_trends()
     # 5. 状态已经按最新指标重算，固化发生变化的状态事件供绩效/回放/报告复用。
     sync_signal_events()
+    # 6. 补齐最近窗口信号事件的后续实际表现（T+5/T+20 收益、成败判定）。
+    enrich_signal_performance()
     logger.info(f"========== 每日全量更新管线完成 {today}（已更新至 {target} 收盘）==========")
 
 
