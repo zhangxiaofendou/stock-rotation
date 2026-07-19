@@ -188,6 +188,44 @@ def _render_alerts(perf: pd.DataFrame):
     )
 
 
+def _render_init_prompt():
+    """账本为空（云端首次部署常见）时的自初始化引导。"""
+    st.info(
+        "信号后续表现数据尚未生成（云端首次部署时常见）。\n"
+        "点击下方按钮，用**已提交的历史行情**在本地/云端重建账本"
+        "（约 1–3 分钟，仅首次需要，重建后看板会立即刷新）。"
+    )
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("▶ 开始初始化", key="init_signal_perf", type="primary"):
+            _run_init(force=False)
+    with col2:
+        if st.button("🔄 强制重建", key="reinit_signal_perf"):
+            _run_init(force=True)
+
+
+def _run_init(force: bool = False):
+    from data.runtime_init import ensure_signal_performance
+    with st.spinner("正在从已提交的历史行情重建信号表现账本（首次约 1–3 分钟）..."):
+        try:
+            res = ensure_signal_performance(force=force)
+        except Exception as e:  # noqa: BLE001
+            st.exception(e)
+            return
+    if res["built"]:
+        msg = f"初始化完成：写入 {res['perf']} 条信号表现、{res['events']} 条信号事件。"
+        if not res["benchmark_ok"]:
+            msg += "（基准下载失败，超额收益列暂为空；运行每日管线后可补全）"
+        st.success(msg)
+    else:
+        st.info("数据已存在，无需重建。")
+    try:
+        load_perf_df.clear()
+    except Exception:  # noqa: BLE001
+        pass
+    st.rerun()
+
+
 def render():
     """信号绩效主入口。"""
     st.title("📈 信号绩效")
@@ -195,8 +233,7 @@ def render():
                "系统不重算状态机，仅后验跟踪；与回测模拟收益严格区分。")
     perf = load_perf_df()
     if perf is None or perf.empty:
-        st.info("尚未生成信号后续表现数据。请先运行 `python -m signal_tracker.tracker` 补全历史表现，"
-                "或等待每日管线自动回填。")
+        _render_init_prompt()
         return
     perf["event_date"] = pd.to_datetime(perf["event_date"])
 
