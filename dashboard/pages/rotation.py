@@ -5,6 +5,7 @@
 """
 
 import streamlit as st
+import streamlit.components.v1 as components
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
@@ -26,8 +27,6 @@ from dashboard.components.state_card import (
     get_state_signal, get_state_signal_color, get_signal_legend,
 )
 from dashboard.components.drill_pickers import (
-    load_all_sector_states as _load_drill_states,
-    render_state_picker,
     render_transition_picker,
     render_sector_picker,
 )
@@ -293,97 +292,58 @@ def _render_kline_chart(kline_df: pd.DataFrame, sector_name: str):
     st.plotly_chart(fig, width="stretch")
 
 
-def _render_heatmap(state_df: pd.DataFrame):
-    """渲染九宫格热力图（自定义HTML表格）"""
+def _render_heatmap_clickable(state_df: pd.DataFrame, key: str = "heatmap_clickable"):
+    """渲染可点击的九宫格热力图（基于 streamlit.components 双向通信）。
+
+    返回用户点击方块对应的状态名（str），未点击返回 None。
+    点击方块即等价于「按九宫格状态筛选」，用于驱动下方板块详情联动。
+    """
     if state_df is None or state_df.empty:
         st.warning("暂无数据")
-        return
+        return None
 
     # 九宫格定义
     grid = [
-        # (row, col, state_label, description)
-        (0, 0, "①领涨减速", "领涨减速"),
-        (0, 1, "②稳健上行", "稳健上行"),
-        (0, 2, "③加速冲顶", "加速冲顶"),
-        (1, 0, "④强转弱", "强转弱"),
-        (1, 1, "⑤中性震荡", "中性震荡"),
-        (1, 2, "⑥弱转强", "弱转强"),
-        (2, 0, "⑦持续杀跌", "持续杀跌"),
-        (2, 1, "⑧下跌中继", "下跌中继"),
-        (2, 2, "⑨底背离", "底背离"),
+        (0, 0, "①领涨减速"), (0, 1, "②稳健上行"), (0, 2, "③加速冲顶"),
+        (1, 0, "④强转弱"),   (1, 1, "⑤中性震荡"), (1, 2, "⑥弱转强"),
+        (2, 0, "⑦持续杀跌"), (2, 1, "⑧下跌中继"), (2, 2, "⑨底背离"),
     ]
 
     # 统计每个格子的板块
     grid_data = {}
-    for state_label in [g[2] for g in grid]:
+    for _, _, state_label in grid:
         subset = state_df[state_df["state"] == state_label]
         grid_data[state_label] = {
             "count": len(subset),
             "sectors": list(subset["sector_name"].values) if len(subset) > 0 else [],
-            "codes": list(subset["sector_code"].values) if len(subset) > 0 else [],
         }
 
-    # 构建HTML表格
-    html = """
-    <style>
-    .nine-grid { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    .nine-grid td { 
-        padding: 12px; text-align: center; vertical-align: top; 
-        border: 1px solid #e0e0e0; width: 33%; height: 150px;
-    }
-    .nine-grid .state-name { font-weight: bold; font-size: 14px; margin-bottom: 4px; }
-    .nine-grid .count { font-size: 22px; font-weight: bold; margin-bottom: 4px; }
-    .nine-grid .sectors { font-size: 11px; color: #666; line-height: 1.4; }
-    .nine-grid .signal-pill {
-        display: inline-block; margin: 4px 0 6px; padding: 1px 10px;
-        border-radius: 10px; font-size: 12px; font-weight: 700; color: #fff;
-    }
-    </style>
-    <table class="nine-grid">
-    """
-
+    # 构建单元格（可点击：onclick 回传 data-state）
+    cells_html = ""
     for row in range(3):
-        html += "<tr>"
+        cells_html += "<tr>"
         for col in range(3):
-            cell = [g for g in grid if g[0] == row and g[1] == col][0]
-            state_label = cell[2]
-            desc = cell[3]
+            state_label = [g[2] for g in grid if g[0] == row and g[1] == col][0]
             data = grid_data[state_label]
             color = STATE_COLORS.get(state_label, "#9E9E9E")
             emoji = STATE_EMOJI.get(state_label, "")
             signal = get_state_signal(state_label)
             signal_color = get_state_signal_color(state_label)
-
-            # 根据状态设置背景色
-            if state_label in ["⑥弱转强", "⑨底背离"]:
-                bg = "#E8F5E9"
-            elif state_label == "③加速冲顶":
-                bg = "#FFFDE7"
-            elif state_label in ["①领涨减速", "④强转弱"]:
-                bg = "#FFF3E0"
-            elif state_label in ["⑦持续杀跌", "⑧下跌中继"]:
-                bg = "#FFEBEE"
-            elif state_label == "②稳健上行":
-                bg = "#F1F8E9"
-            else:
-                bg = "#F5F5F5"
+            bg = STATE_BG_COLORS.get(state_label, "background-color:#F5F5F5;")
 
             sectors_html = "<br>".join(data["sectors"][:8])
             if len(data["sectors"]) > 8:
                 sectors_html += f"<br>...等{len(data['sectors'])}个"
 
-            html += f"""
-            <td style="background-color:{bg};">
+            cells_html += f"""
+            <td class="hm-cell" style="{bg}" data-state="{state_label}" onclick="hmClick(this)" title="点击按 {state_label} 筛选">
                 <div class="state-name" style="color:{color};">{emoji} {state_label}</div>
                 <div class="signal-pill" style="background-color:{signal_color};">{signal}</div>
                 <div class="count" style="color:{color};">{data['count']}</div>
                 <div class="sectors">{sectors_html or '-'}</div>
             </td>
             """
-
-        html += "</tr>"
-
-    html += "</table>"
+        cells_html += "</tr>"
 
     # 信号图例
     legend_items = []
@@ -395,9 +355,41 @@ def _render_heatmap(state_df: pd.DataFrame):
             f'font-weight:700;background-color:{item["color"]};">{item["signal"]}</span>'
             f' <span style="color:#666;">{item["desc"]}（{states}）</span></span>'
         )
-    html += '<div style="margin-top:10px;line-height:1.8;">' + "".join(legend_items) + "</div>"
+    legend_html = '<div style="margin-top:10px;line-height:1.8;">' + "".join(legend_items) + "</div>"
 
-    st.html(html)
+    # 模板用普通字符串，{cells} 占位由 .replace 填充，避免与 CSS/JS 的大括号冲突
+    template = """
+    <style>
+    .hm-grid { width:100%; border-collapse:separate; border-spacing:6px; table-layout:fixed; }
+    .hm-cell { padding:12px; text-align:center; vertical-align:top; border:1px solid #e0e0e0;
+               border-radius:6px; cursor:pointer; transition:box-shadow .12s; }
+    .hm-cell:hover { box-shadow:0 0 0 3px #FF6F00 inset; }
+    .hm-cell .state-name { font-weight:bold; font-size:14px; margin-bottom:4px; }
+    .hm-cell .signal-pill { display:inline-block; margin:4px 0 6px; padding:1px 10px;
+               border-radius:10px; font-size:12px; font-weight:700; color:#fff; }
+    .hm-cell .count { font-size:22px; font-weight:bold; margin-bottom:4px; }
+    .hm-cell .sectors { font-size:11px; color:#666; line-height:1.4; }
+    </style>
+    <table class="hm-grid">{cells}</table>
+    <script>
+    function hmSet(v){
+        if (window.Streamlit && window.Streamlit.setComponentValue) {
+            window.Streamlit.setComponentValue(v);
+        } else if (window.parent && window.parent.Streamlit && window.parent.Streamlit.setComponentValue) {
+            window.parent.Streamlit.setComponentValue(v);
+        }
+    }
+    function hmClick(el){
+        var s = el.getAttribute('data-state');
+        hmSet(s);
+    }
+    hmSet(null);
+    </script>
+    """
+    html = template.replace("{cells}", cells_html) + legend_html
+
+    return components.html(html, height=540, scrolling=True, key=key)
+
 
 
 @st.cache_data(ttl=86400)
@@ -575,62 +567,69 @@ def render():
     # ================================================================
     # 受控 Tab 切换（刷新保留、关页重置）
     # ================================================================
-    ROTATION_TABS = ["九宫格热力图", "板块详情", "趋势验证", "个股下钻"]
+    ROTATION_TABS = ["九宫格热力图", "趋势验证", "个股下钻"]
     active_tab = persistent_tabs("rotation_tab", ROTATION_TABS)
 
 
-    def _render_heatmap_tab(state_df):
-        """九宫格热力图页签内容"""
-        st.subheader("九宫格板块分布热力图")
-        st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向")
+    def _render_heatmap_tab(state_df, score_df):
+        """九宫格热力图页签（已合并「板块详情」）。
 
-        _render_heatmap(state_df)
-
-        # ================================================================
-        # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
-        # ================================================================
-    def _render_detail_tab(state_df, score_df):
-        """板块详情（原独立页面迁入）。
-
-        抽成函数：原代码块内有多处 `return`，若直接写在 render() 的 `with tab2:`
-        里会提前退出整个 render()，导致后续 tab3/tab4 永不渲染。
+        点击热力图方块即可按状态筛选板块；亦可在下方切换「按状态切换筛选」。
+        选中具体板块后，下方联动渲染其完整详情。
         """
-        st.subheader("板块详情")
-        st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 板块详情")
+        st.subheader("九宫格板块分布热力图")
+        st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向　·　点击方块按状态筛选板块")
 
-        # 加载 drill 状态数据
-        drill_states = _load_drill_states()
+        clicked = _render_heatmap_clickable(state_df, key="rotation_hm")
+        if clicked:
+            st.session_state["rotation_hm_state"] = clicked
+        selected_state = st.session_state.get("rotation_hm_state", None)
 
-        if drill_states is None or drill_states.empty:
-            st.warning("暂无板块数据")
-            return
+        if selected_state:
+            n = int((state_df["state"] == selected_state).sum())
+            st.info(f"已按「{selected_state}」筛选 · 共 {n} 个板块")
+            if st.button("清除状态筛选", key="rotation_hm_clear"):
+                st.session_state["rotation_hm_state"] = None
+                st.rerun()
 
-        # --- 第 1 级：选择筛选维度 ---
         filter_mode = st.radio(
             "筛选维度",
             ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
             horizontal=True,
-            key="rotation_tab3_filter",
+            key="rotation_merge_filter",
         )
 
-        # --- 第 2 级：按状态/切换筛选 → 选行业 ---
-        # 注意：板块详情与个股下钻同页渲染，picker 默认 key 会冲突，需加 detail_ 前缀
         if filter_mode.startswith("🎯"):
-            _, matching_df = render_state_picker(drill_states, key="detail_state_picker")
+            matching_df = (
+                state_df[state_df["state"] == selected_state].copy()
+                if selected_state else state_df.copy()
+            )
         else:
-            _, matching_df = render_transition_picker(drill_states, key="detail_transition_picker")
+            _, matching_df = render_transition_picker(state_df, key="merge_transition_picker")
 
         if matching_df is None or matching_df.empty:
             st.info("👆 请先选择筛选条件")
             return
 
         st.markdown("---")
-        selected_code, sector_label = render_sector_picker(
-            matching_df, label="选择行业查看详情", key="detail_sector_picker"
+        selected_code, _ = render_sector_picker(
+            matching_df, label="选择行业查看详情", key="merge_sector_picker"
         )
 
         if not selected_code:
             return
+
+        _render_sector_detail(state_df, score_df, selected_code)
+
+        # ================================================================
+        # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
+        # ================================================================
+    def _render_sector_detail(state_df, score_df, selected_code):
+        """渲染选中板块的详情（当前状态卡片 + K线/RS/RS动量 + 状态历史）。
+
+        由原「板块详情」页签内容合并而来，现由「九宫格热力图」页签在选中
+        具体板块后调用。
+        """
 
         sector_name = get_sector_name(selected_code)
 
@@ -1093,12 +1092,10 @@ def render():
             _render_score_process(chosen_code, chosen_name, score_df)
 
     # ================================================================
-    # 受控 Tab 分发（依赖上面已定义的 _render_detail_tab / _render_trend_tab）
+    # 受控 Tab 分发（九宫格热力图已合并板块详情）
     # ================================================================
     if active_tab == "九宫格热力图":
-        _render_heatmap_tab(state_df)
-    elif active_tab == "板块详情":
-        _render_detail_tab(state_df, score_df)
+        _render_heatmap_tab(state_df, score_df)
     elif active_tab == "趋势验证":
         _render_trend_tab(state_df, score_df)
     elif active_tab == "个股下钻":
