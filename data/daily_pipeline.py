@@ -40,6 +40,8 @@ from config.sector_map import SW_LEVEL2_MAP  # noqa: E402
 from data.sources.akshare_source import AkShareSource  # noqa: E402
 from data.storage.parquet_store import ParquetStore  # noqa: E402
 from data.storage.sqlite_store import SQLiteStore  # noqa: E402
+from data.freshness import DataFreshness  # noqa: E402
+from data.daily_update import update_benchmarks as refresh_benchmarks  # noqa: E402
 from indicators.price_trend import PriceTrend  # noqa: E402
 
 logger = get_logger(__name__)
@@ -119,21 +121,11 @@ def data_is_current(target: str) -> bool:
 
 
 def update_benchmarks():
-    """同步更新基准指数到最新。RS 强依赖基准同日数据，必须随板块行情同步。"""
-    src = AkShareSource()
-    ps = ParquetStore()
-    for code, sh in BENCHMARKS.items():
-        try:
-            df = src.get_benchmark_hist(sh)
-            if df is None or df.empty:
-                logger.warning(f"基准 {code} 拉取为空，跳过")
-                continue
-            df = df.copy()
-            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
-            ps.save_benchmark_hist(sh, df)
-            logger.info(f"基准 {code} 已更新，最新 {df['date'].max()}")
-        except Exception as e:
-            logger.error(f"基准 {code} 更新失败: {e}")
+    """同步更新基准指数与新鲜度记录，复用手动刷新唯一实现。"""
+    updated, errors = refresh_benchmarks(
+        AkShareSource(), ParquetStore(), DataFreshness()
+    )
+    logger.info(f"基准指数更新完成：成功 {updated}，失败 {errors}")
 
 
 def recompute_trends():

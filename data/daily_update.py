@@ -36,6 +36,17 @@ from data.freshness import DataFreshness
 
 logger = get_logger(__name__)
 
+# RS 计算使用的基准指数。键为储存/新鲜度记录的规范代码，值为 AkShare 接口代码。
+BENCHMARKS = {
+    "sh000300": "沪深300",
+    "sh000905": "中证500",
+    "sh000852": "中证1000",
+    "sh000016": "上证50",
+    "sz399006": "创业板指",
+}
+# 早期初始化曾用无交易所前缀的代码写入失败记录；更新时应清理。
+LEGACY_BENCHMARK_KEYS = ("000300", "000905", "000852", "000016", "399006")
+
 # 快照缓存路径
 SNAPSHOT_DIR = PROJECT_ROOT / "data" / "storage" / "parquet" / "cache"
 STATE_SNAPSHOT = SNAPSHOT_DIR / "state_snapshot.parquet"
@@ -191,6 +202,52 @@ def update_all_sectors(source: AkShareSource, parquet: ParquetStore,
     return updated, skipped, errors
 
 
+def update_benchmarks(source: AkShareSource, parquet: ParquetStore,
+                      freshness: DataFreshness, dry_run: bool = False) -> tuple:
+    """更新 RS 所依赖的基准指数，并同步修复其新鲜度记录。
+
+    返回 `(updated, errors)`。基准文件按 AkShare 规范代码（如 `sh000300`）落盘，
+    新鲜度记录使用同一代码，避免历史无前缀失败记录被汇总为异常。
+    """
+    updated = errors = 0
+
+    # 清理旧初始化流程留下的无交易所前缀错误记录。
+    if not dry_run:
+        for legacy_key in LEGACY_BENCHMARK_KEYS:
+            freshness.store.delete_freshness("benchmark_hist", legacy_key)
+
+    for code, name in BENCHMARKS.items():
+        try:
+            df = source.get_benchmark_hist(symbol=code)
+            if df is None or df.empty or "date" not in df.columns:
+                raise ValueError("AkShare 返回空数据或缺少 date 列")
+
+            df = df.copy()
+            df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
+            df = df.sort_values("date").drop_duplicates("date", keep="last").reset_index(drop=True)
+
+            if not dry_run:
+                parquet.save_benchmark_hist(code, df)
+                freshness.record_update(
+                    data_type="benchmark_hist",
+                    data_key=code,
+                    data_start=df["date"].iloc[0],
+                    data_end=df["date"].iloc[-1],
+                    record_count=len(df),
+                    status="ok",
+                )
+            updated += 1
+            logger.info(f"基准指数 {name} ({code}) 已更新，最新 {df['date'].iloc[-1]}")
+        except Exception as e:
+            errors += 1
+            logger.error(f"基准指数 {name} ({code}) 更新失败: {e}")
+            if not dry_run:
+                freshness.record_update(
+                    data_type="benchmark_hist", data_key=code, status="error"
+                )
+    return updated, errors
+
+
 def run_update(dry_run: bool = False) -> tuple:
     """执行完整的数据更新流程（可被 Streamlit 看板调用）。
 
@@ -201,19 +258,24 @@ def run_update(dry_run: bool = False) -> tuple:
     parquet = ParquetStore()
     freshness = DataFreshness()
 
-    # 1. 拉取最新数据
-    updated, skipped, errors = update_all_sectors(
+    # 1. 拉取最新板块行情
+    updated, skipped, sector_errors = update_all_sectors(
         source, parquet, freshness, dry_run=dry_run
     )
+    # 2. 同步更新 RS 依赖的基准指数及其新鲜度记录
+    benchmark_updated, benchmark_errors = update_benchmarks(
+        source, parquet, freshness, dry_run=dry_run
+    )
+    errors = sector_errors + benchmark_errors
 
     if dry_run:
         return updated, skipped, errors, "预览模式，未写入任何数据"
 
-    if updated == 0:
-        logger.info("没有板块需要更新，跳过快照清除")
-    else:
-        # 2. 清除快照缓存，Dashboard 下次刷新时自动重新计算
+    if updated > 0 or benchmark_updated > 0:
+        # 清除状态快照，Dashboard 下次刷新时自动重新计算
         invalidate_snapshots()
+    else:
+        logger.info("板块与基准指数均无新增数据，跳过快照清除")
 
     # 3. 生成数据新鲜度报告
     report = freshness.generate_report()

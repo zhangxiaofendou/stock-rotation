@@ -344,6 +344,23 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    def delete_freshness(self, data_type: str, data_key: str = None):
+        """删除已废弃或错误的数据新鲜度记录。"""
+        conn = self._get_conn()
+        try:
+            if data_key is None:
+                conn.execute("DELETE FROM data_freshness WHERE data_type = ?", (data_type,))
+            else:
+                conn.execute(
+                    "DELETE FROM data_freshness WHERE data_type = ? AND data_key = ?",
+                    (data_type, data_key),
+                )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"删除数据新鲜度记录失败 {data_type}/{data_key}: {e}")
+        finally:
+            conn.close()
+
     def get_freshness_report(self) -> pd.DataFrame:
         """获取数据新鲜度报告"""
         conn = self._get_conn()
