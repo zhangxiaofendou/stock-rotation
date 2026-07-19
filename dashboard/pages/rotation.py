@@ -388,7 +388,7 @@ def _render_heatmap_clickable(state_df: pd.DataFrame, key: str = "heatmap_clicka
     """
     html = template.replace("{cells}", cells_html) + legend_html
 
-    return components.html(html, height=540, scrolling=True, key=key)
+    return components.html(html, height=540, scrolling=True)
 
 
 
