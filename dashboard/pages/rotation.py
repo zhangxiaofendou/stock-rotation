@@ -554,6 +554,14 @@ def render():
         st.subheader("九宫格板块分布热力图")
         st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向　·　点击方块按状态筛选板块")
 
+        # 筛选模式置于热力图上方，先选择查看路径再浏览九宫格。
+        filter_mode = st.radio(
+            "筛选维度",
+            ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
+            horizontal=True,
+            key="rotation_merge_filter",
+        )
+
         _render_heatmap_clickable(state_df)
         selected_state = st.session_state.get("rotation_hm_state")
 
@@ -563,13 +571,6 @@ def render():
             if st.button("清除状态筛选", key="rotation_hm_clear"):
                 st.session_state["rotation_hm_state"] = None
                 st.rerun()
-
-        filter_mode = st.radio(
-            "筛选维度",
-            ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
-            horizontal=True,
-            key="rotation_merge_filter",
-        )
 
         if filter_mode.startswith("🎯"):
             matching_df = (
