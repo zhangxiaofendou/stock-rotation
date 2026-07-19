@@ -50,17 +50,30 @@ GRID_LAYOUT = [
     ["⑦持续杀跌", "⑧下跌中继", "⑨底背离"],
 ]
 
-STATE_COLORS = {
-    "①领涨减速": ("#FFF3E0", "#E65100"),
-    "②稳健上行": ("#E8F5E9", "#2E7D32"),
-    "③加速冲顶": ("#FCE4EC", "#C62828"),
-    "④强转弱":   ("#FFF8E1", "#F9A825"),
-    "⑤中性震荡": ("#ECEFF1", "#546E7A"),
-    "⑥弱转强":   ("#E3F2FD", "#1565C0"),
-    "⑦持续杀跌": ("#FFEBEE", "#B71C1C"),
-    "⑧下跌中继": ("#F3E5F5", "#6A1B9A"),
-    "⑨底背离":   ("#E0F2F1", "#00695C"),
+# 趋势分组：根据状态切换的目标状态判定切换后的方向
+TREND_OF_STATE = {
+    "①领涨减速": "上涨",
+    "②稳健上行": "上涨",
+    "③加速冲顶": "上涨",
+    "④强转弱":   "下跌",
+    "⑤中性震荡": "横盘",
+    "⑥弱转强":   "上涨",
+    "⑦持续杀跌": "下跌",
+    "⑧下跌中继": "下跌",
+    "⑨底背离":   "上涨",
 }
+TREND_ORDER = {"下跌": 0, "上涨": 1, "横盘": 2}
+TREND_EMOJI = {"下跌": "📉", "上涨": "📈", "横盘": "➡️"}
+
+# 动作排序：按目标状态的交易信号分组
+ACTION_ORDER = {"卖出": 0, "买入": 1, "持有": 2, "观望": 3}
+
+
+def _get_state_meta(state: str) -> tuple:
+    """返回状态的趋势方向与交易信号"""
+    signal = StateMachine.STATE_SIGNAL_MAP.get(state, StateMachine.SIGNAL_WATCH)
+    trend = TREND_OF_STATE.get(state, "横盘")
+    return trend, signal
 
 
 # ============================================================
@@ -238,38 +251,68 @@ def render_transition_picker(all_states_df, key="transition_picker"):
 
     buy_targets = {"⑨底背离", "⑥弱转强"}
     sell_targets = {"①领涨减速", "④强转弱", "⑦持续杀跌"}
+    signal_colors = {
+        StateMachine.SIGNAL_SELL: "#e23c3c",
+        StateMachine.SIGNAL_BUY:  "#16a34a",
+        StateMachine.SIGNAL_HOLD: "#f59e0b",
+        StateMachine.SIGNAL_WATCH: "#9e9e9e",
+    }
+
+    def _extract_to_state(state_change: str) -> str:
+        return state_change.split(" → ")[-1] if " → " in state_change else ""
 
     transition_types = trans_df.groupby("state_change").agg(
         count=("sector_code", "count"),
         sectors=("sector_name", lambda x: list(x)),
         latest_date=("date", "max"),
     ).reset_index()
-    transition_types = transition_types.sort_values("count", ascending=False)
+    transition_types["to_state"] = transition_types["state_change"].apply(_extract_to_state)
+    transition_types["trend"] = transition_types["to_state"].map(lambda s: TREND_OF_STATE.get(s, "横盘"))
+    transition_types["action"] = transition_types["to_state"].map(lambda s: StateMachine.STATE_SIGNAL_MAP.get(s, StateMachine.SIGNAL_WATCH))
+    transition_types["trend_order"] = transition_types["trend"].map(TREND_ORDER)
+    transition_types["action_order"] = transition_types["action"].map(ACTION_ORDER)
+    transition_types = transition_types.sort_values(
+        ["latest_date", "trend_order", "action_order", "count"],
+        ascending=[False, True, True, False],
+    ).reset_index(drop=True)
 
-    st.markdown(f"##### 最近 {days_back} 个交易日状态切换统计")
+    total_transitions = int(transition_types["count"].sum())
+    st.markdown(f"##### 最近 {days_back} 个交易日状态切换统计 · 共 {total_transitions} 次")
 
-    for _, row in transition_types.iterrows():
-        state_chg = row["state_change"]
-        count = row["count"]
-        sectors = row["sectors"]
-        latest = str(row["latest_date"])[:10]
+    # 按日期 → 趋势 → 动作 层级展示
+    from itertools import groupby
 
-        to_s = state_chg.split(" → ")[-1] if " → " in state_chg else ""
-        badge = ""
-        if to_s in buy_targets:
-            badge = " 🟢买入"
-        elif to_s in sell_targets:
-            badge = " 🔴卖出"
+    for latest_date, date_group in groupby(transition_types.to_dict("records"), key=lambda r: r["latest_date"]):
+        date_str = str(latest_date)[:10]
+        st.markdown(f"### 📅 {date_str}")
 
-        with st.expander(f"**{state_chg}**{badge} — {count} 个板块 | 最近: {latest}", expanded=False):
-            for s in sectors[:20]:
-                sc = all_states_df[all_states_df["sector_name"] == s]
-                sc_state = sc.iloc[0]["state"] if not sc.empty else ""
-                st.caption(f"• {s} [当前: {sc_state}]")
-            if count > 20:
-                st.caption(f"... 还有 {count - 20} 个板块")
+        for trend, trend_group in groupby(date_group, key=lambda r: r["trend"]):
+            trend_group = list(trend_group)
+            trend_total = sum(int(r["count"]) for r in trend_group)
+            st.markdown(
+                f"**{TREND_EMOJI.get(trend, '')} {trend}** "
+                f"<span style='color:#666; font-size:13px;'>({trend_total} 个板块)</span>",
+                unsafe_allow_html=True,
+            )
 
-    st.markdown("---")
+            for row in trend_group:
+                state_chg = row["state_change"]
+                count = int(row["count"])
+                sectors = row["sectors"]
+                action = row["action"]
+                action_color = signal_colors.get(action, "#9e9e9e")
+                action_badge = f"<span style='color:{action_color}; font-weight:700;'>{action}</span>"
+
+                with st.expander(f"{state_chg} · {action_badge} · {count} 个板块", expanded=False):
+                    # 使用紧凑的列布局减少空白
+                    for i, s in enumerate(sectors[:20]):
+                        sc = all_states_df[all_states_df["sector_name"] == s]
+                        sc_state = sc.iloc[0]["state"] if not sc.empty else ""
+                        st.caption(f"• {s} [当前: {sc_state}]")
+                    if count > 20:
+                        st.caption(f"... 还有 {count - 20} 个板块")
+
+        st.markdown("---")
 
     transition_options = [""] + list(transition_types["state_change"])
     selected_transition = st.selectbox(
