@@ -46,6 +46,12 @@ _report_data.json
 data/storage/sector_rotation.db
 data/storage/parquet/index_hist/benchmark_*.parquet
 data/storage/experiments/
+data/storage/reports/
+data/storage/notification_subs.json
+
+# Notification channel credentials — independent config, never commit
+config/notification.json
+config/notification.yaml
 
 # Local validation / report artifacts
 _industry_scores_report.csv

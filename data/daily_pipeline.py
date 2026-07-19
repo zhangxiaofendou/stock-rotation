@@ -190,6 +190,32 @@ def enrich_signal_performance():
         logger.error(f"信号后续表现补全失败: {e}")
 
 
+def generate_daily_report():
+    """管线末尾生成当日盘后报告，并按订阅推送通知（PRD 阶段 D）。
+
+    报告只汇总已计算结果，失败不影响主管线。通知走统一 NotificationService，
+    仅当事件已订阅且渠道已配置时才真正发送。
+    """
+    try:
+        from report.generator import generate_report
+        res = generate_report()
+        logger.info("盘后报告已生成：%s", res["as_of_date"])
+        # 失败告警：若市场环境为防御/熔断，单独补发一条通知（复用统一服务）
+        try:
+            from notification.service import NotificationService
+            svc = NotificationService()
+            if svc.should_notify("report_generated"):
+                svc.notify_event(
+                    "report_generated",
+                    f"盘后报告 {res['as_of_date']} 已生成",
+                    "盘后报告已生成，详见应用内「盘后报告」页。",
+                )
+        except Exception as e:
+            logger.warning("盘后报告通知失败（不影响报告生成）: %s", e)
+    except Exception as e:
+        logger.error(f"盘后报告生成失败: {e}")
+
+
 def run_module(mod: str) -> int:
     """以子进程运行一个 python -m 模块，捕获日志。返回 returncode。"""
     logger.info(f"▶ 执行 python -m {mod}")
@@ -239,6 +265,8 @@ def main():
         sync_signal_events()
         # 同步账本后增量补全信号后续表现，保证绩效数据不滞后。
         enrich_signal_performance()
+        # 管线末尾生成当日盘后报告（含通知）
+        generate_daily_report()
         return
 
     # 非交易日但数据滞后：仍补跑到最新交易日收盘（如周六补周五数据），
@@ -261,6 +289,8 @@ def main():
     sync_signal_events()
     # 6. 补齐最近窗口信号事件的后续实际表现（T+5/T+20 收益、成败判定）。
     enrich_signal_performance()
+    # 7. 管线末尾生成当日盘后报告（含通知）
+    generate_daily_report()
     logger.info(f"========== 每日全量更新管线完成 {today}（已更新至 {target} 收盘）==========")
 
 
