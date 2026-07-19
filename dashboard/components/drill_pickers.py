@@ -112,11 +112,12 @@ def load_all_sector_states():
     return pd.DataFrame()
 
 
-def detect_state_transitions(all_states_df, days_back=5):
-    """检测最近 N 个交易日内的状态切换。
+def detect_state_transitions(all_states_df, days_back=5, latest_only=False):
+    """检测板块状态切换。
 
-    `days_back` 按状态序列末尾的交易日计数，自动覆盖周末和节假日；
-    因而「最近5天」展示的是最近 5 个交易日的切换，而非自然日。
+    默认扫描最近 `days_back` 个交易日的历史切换，供个股下钻等历史回顾使用。
+    `latest_only=True` 时仅比较最近两个交易日，返回「上一交易日状态 → 当前状态」；
+    这是板块轮动监控的状态切换筛选语义，确保目标状态与当前状态一致。
 
     返回:
         pd.DataFrame: sector_code, sector_name, from_state, to_state,
@@ -135,10 +136,15 @@ def detect_state_transitions(all_states_df, days_back=5):
             if state_series is None or state_series.empty or len(state_series) < 2:
                 continue
 
-            recent = state_series.tail(days_back + 2)
+            if latest_only:
+                # 当前状态切换：只比较上一交易日与最新交易日。
+                # 目标状态必然等于状态快照中的当前状态，避免历史变更混入。
+                recent = state_series.tail(2)
+            else:
+                recent = state_series.tail(days_back + 2)
+
             states = recent["state"].tolist()
             dates = recent["date"].tolist()
-
             for i in range(1, len(states)):
                 if states[i] != states[i - 1]:
                     transitions.append({
@@ -255,11 +261,12 @@ def render_transition_picker(all_states_df, key="transition_picker"):
     """第一层：按状态切换筛选 → 返回 (选定切换类型, 匹配板块DataFrame)"""
     st.markdown("#### 🔄 按状态切换筛选")
 
-    days_back = 5
-    trans_df = detect_state_transitions(all_states_df, days_back=days_back)
+    # 此处只展示「上一交易日 → 当前交易日」的实时状态切换，
+    # 历史多日切换不混入，避免目标状态与当前状态不一致。
+    trans_df = detect_state_transitions(all_states_df, latest_only=True)
 
     if trans_df.empty:
-        st.info(f"最近 {days_back} 个交易日没有板块发生状态切换")
+        st.info("最新交易日没有板块发生状态切换")
         st.metric("全部板块", f"{len(all_states_df)} 个")
         return None, None
 
@@ -292,7 +299,7 @@ def render_transition_picker(all_states_df, key="transition_picker"):
     ).reset_index(drop=True)
 
     total_transitions = int(transition_types["count"].sum())
-    st.markdown(f"##### 最近 {days_back} 个交易日状态切换统计 · 共 {total_transitions} 次")
+    st.markdown(f"##### 上一交易日 → 当前交易日状态切换 · 共 {total_transitions} 个板块")
 
     # 按日期 → 趋势 → 动作 层级展示
     from itertools import groupby
