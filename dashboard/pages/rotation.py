@@ -291,6 +291,14 @@ def _render_kline_chart(kline_df: pd.DataFrame, sector_name: str):
     st.plotly_chart(fig, width="stretch")
 
 
+def _select_heatmap_state(state_label: str):
+    """九宫格状态按钮回调：在控件创建前同步筛选状态，避免会话状态写入异常。"""
+    st.session_state["rotation_hm_state"] = state_label
+    st.session_state["rotation_merge_filter"] = "🎯 按九宫格状态筛选"
+    # 行业选择器候选集已经切换，清空旧行业，避免保留状态切换模式下的选项。
+    st.session_state.pop("merge_sector_picker", None)
+
+
 def _render_heatmap_clickable(state_df: pd.DataFrame):
     """渲染九宫格热力图及原生筛选按钮。
 
@@ -342,16 +350,15 @@ def _render_heatmap_clickable(state_df: pd.DataFrame):
                     """,
                     unsafe_allow_html=True,
                 )
-                if st.button(
+                st.button(
                     "✓ 当前已选" if is_selected else f"查看 {state_label} 板块",
                     key=f"rotation_hm_select_{state_label}",
                     type="primary" if is_selected else "secondary",
                     width="stretch",
                     disabled=is_selected,
-                ):
-                    st.session_state["rotation_hm_state"] = state_label
-                    st.session_state["rotation_merge_filter"] = "🎯 按九宫格状态筛选"
-                    st.rerun()
+                    on_click=_select_heatmap_state,
+                    args=(state_label,),
+                )
 
     legend_items = []
     for item in get_signal_legend():
