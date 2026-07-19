@@ -270,29 +270,40 @@ def render_transition_picker(all_states_df, key="transition_picker"):
         st.metric("全部板块", f"{len(all_states_df)} 个")
         return None, None
 
-    buy_targets = {"⑨底背离", "⑥弱转强"}
-    sell_targets = {"①领涨减速", "④强转弱", "⑦持续杀跌"}
-
     action_emoji = {
         StateMachine.SIGNAL_SELL: "🔴",
-        StateMachine.SIGNAL_BUY:  "🟢",
+        StateMachine.SIGNAL_BUY: "🟢",
         StateMachine.SIGNAL_HOLD: "🟡",
         StateMachine.SIGNAL_WATCH: "⚪",
     }
 
-    def _extract_to_state(state_change: str) -> str:
-        return state_change.split(" → ")[-1] if " → " in state_change else ""
+    def _extract_state(state_change: str, position: int) -> str:
+        """从“前一状态 → 当前状态”中取指定一端的状态。"""
+        parts = state_change.split(" → ")
+        return parts[position] if len(parts) == 2 else ""
 
     transition_types = trans_df.groupby("state_change").agg(
         count=("sector_code", "count"),
         sectors=("sector_name", lambda x: list(x)),
         latest_date=("date", "max"),
     ).reset_index()
-    transition_types["to_state"] = transition_types["state_change"].apply(_extract_to_state)
-    transition_types["trend"] = transition_types["to_state"].map(lambda s: TREND_OF_STATE.get(s, "横盘"))
-    transition_types["action"] = transition_types["to_state"].map(lambda s: StateMachine.STATE_SIGNAL_MAP.get(s, StateMachine.SIGNAL_WATCH))
+    transition_types["from_state"] = transition_types["state_change"].apply(
+        lambda x: _extract_state(x, 0)
+    )
+    transition_types["to_state"] = transition_types["state_change"].apply(
+        lambda x: _extract_state(x, 1)
+    )
+    transition_types["trend"] = transition_types["to_state"].map(
+        lambda s: TREND_OF_STATE.get(s, "横盘")
+    )
+    transition_types["from_action"] = transition_types["from_state"].map(
+        lambda s: StateMachine.STATE_SIGNAL_MAP.get(s, StateMachine.SIGNAL_WATCH)
+    )
+    transition_types["to_action"] = transition_types["to_state"].map(
+        lambda s: StateMachine.STATE_SIGNAL_MAP.get(s, StateMachine.SIGNAL_WATCH)
+    )
     transition_types["trend_order"] = transition_types["trend"].map(TREND_ORDER)
-    transition_types["action_order"] = transition_types["action"].map(ACTION_ORDER)
+    transition_types["action_order"] = transition_types["to_action"].map(ACTION_ORDER)
     transition_types = transition_types.sort_values(
         ["latest_date", "trend_order", "action_order", "count"],
         ascending=[False, True, True, False],
@@ -321,10 +332,18 @@ def render_transition_picker(all_states_df, key="transition_picker"):
                 state_chg = row["state_change"]
                 count = int(row["count"])
                 sectors = row["sectors"]
-                action = row["action"]
-                action_badge = f"{action_emoji.get(action, '')} {action}"
+                from_action = row["from_action"]
+                to_action = row["to_action"]
+                signal_change = (
+                    f"{action_emoji.get(from_action, '')} {from_action}"
+                    f" → {action_emoji.get(to_action, '')} {to_action}"
+                )
 
-                with st.expander(f"{state_chg} · {action_badge} · {count} 个板块", expanded=False):
+                with st.expander(
+                    f"{state_chg} · 信号：{signal_change} · {count} 个板块",
+                    expanded=False,
+                ):
+                    st.caption(f"前一状态信号：{from_action} → 当前状态信号：{to_action}")
                     # 使用紧凑的列布局减少空白
                     for i, s in enumerate(sectors[:20]):
                         sc = all_states_df[all_states_df["sector_name"] == s]
