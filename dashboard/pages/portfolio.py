@@ -5,7 +5,11 @@ from datetime import date
 import pandas as pd
 import streamlit as st
 
+from data.storage.parquet_store import ParquetStore
+from data.storage.sqlite_store import SQLiteStore
+from model.state_machine import StateMachine
 from portfolio.holdings import PortfolioHoldings
+from portfolio.advisor import PortfolioAdvisor
 
 
 @st.cache_resource
@@ -16,6 +20,12 @@ def get_holdings_service() -> PortfolioHoldings:
 
 def _fmt_cny(value: float) -> str:
     return f"¥{float(value):,.2f}"
+
+
+@st.cache_data(ttl=3600)
+def load_sector_states_for_portfolio() -> pd.DataFrame:
+    """独立加载行业状态，避免持仓页依赖轮动页面模块及其 UI 导入链。"""
+    return StateMachine(ParquetStore(), SQLiteStore()).calc_all_sectors_state()
 
 
 def _render_record_form(service: PortfolioHoldings):
@@ -43,10 +53,12 @@ def _render_record_form(service: PortfolioHoldings):
             with row2[3]:
                 sector_name = st.text_input("所属行业（可选）", placeholder="例如 银行")
 
-            row3 = st.columns([1, 1])
+            row3 = st.columns([1, 1, 1])
             with row3[0]:
-                target_weight = st.number_input("目标仓位 %（可选）", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
+                sector_code = st.text_input("行业代码（可选）", placeholder="例如 801780.SI")
             with row3[1]:
+                target_weight = st.number_input("目标仓位 %（可选）", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
+            with row3[2]:
                 stop_loss = st.number_input("止损价（可选）", min_value=0.0, value=0.0, step=0.01)
             note = st.text_area("备注（可选）", placeholder="例如：按计划建仓 / 组合调仓原因")
             submitted = st.form_submit_button("保存实际操作", type="primary", width="stretch")
@@ -63,6 +75,7 @@ def _render_record_form(service: PortfolioHoldings):
                     price=price,
                     trade_date=trade_date.isoformat(),
                     fee=fee,
+                    sector_code=sector_code or None,
                     sector_name=sector_name or None,
                     target_weight=target_weight / 100 if target_weight else None,
                     stop_loss=stop_loss or None,
@@ -113,12 +126,40 @@ def _render_positions(service: PortfolioHoldings):
 
 
 def _render_pending_items(service: PortfolioHoldings):
-    positions = service.positions()
+    """展示可追溯的持仓复核事项，避免把通用信号直接转成自动交易。"""
     st.subheader("待处理事项")
+    positions = service.positions()
     if positions.empty:
         st.info("录入持仓后，这里将结合九宫格状态、止损条件、行业集中度和市场风险生成待处理事项。")
-    else:
-        st.info("已记录持仓。组合风险、状态变化和止损触发的待处理事项将在“持仓建议引擎”接入后生成；当前不会据此自动产生买卖指令。")
+        return
+
+    try:
+        state_df = load_sector_states_for_portfolio()
+    except Exception:
+        state_df = None
+
+    items = PortfolioAdvisor(service).build_pending_items(state_df)
+    st.caption("事项仅用于复核：行业状态是通用研究信号；止损项需以最新个股行情核验。系统不会自动下单。")
+    if items.empty:
+        st.success("当前未发现需要按既有规则复核的事项。仍建议定期检查持仓逻辑和风险预算。")
+        return
+
+    high_count = int((items["优先级"] == "高").sum())
+    medium_count = int((items["优先级"] == "中").sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("待复核事项", f"{len(items)} 项")
+    c2.metric("高优先级", f"{high_count} 项")
+    c3.metric("中优先级", f"{medium_count} 项")
+
+    st.dataframe(
+        items,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "依据": st.column_config.TextColumn("依据", width="large"),
+            "待处理事项": st.column_config.TextColumn("待处理事项", width="large"),
+        },
+    )
 
 
 def _render_transactions(service: PortfolioHoldings):
