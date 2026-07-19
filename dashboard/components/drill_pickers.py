@@ -69,6 +69,20 @@ TREND_EMOJI = {"下跌": "📉", "上涨": "📈", "横盘": "➡️"}
 ACTION_ORDER = {"卖出": 0, "买入": 1, "持有": 2, "观望": 3}
 
 
+# 状态颜色：背景色 + 文字色（用于九宫格可视化）
+STATE_COLORS = {
+    "①领涨减速": ("#FFF3E0", "#E65100"),
+    "②稳健上行": ("#E8F5E9", "#2E7D32"),
+    "③加速冲顶": ("#FFFDE7", "#F57F17"),
+    "④强转弱":   ("#FFF3E0", "#E65100"),
+    "⑤中性震荡": ("#ECEFF1", "#546E7A"),
+    "⑥弱转强":   ("#E3F2FD", "#1565C0"),
+    "⑦持续杀跌": ("#FFEBEE", "#B71C1C"),
+    "⑧下跌中继": ("#F3E5F5", "#6A1B9A"),
+    "⑨底背离":   ("#E0F2F1", "#00695C"),
+}
+
+
 def _get_state_meta(state: str) -> tuple:
     """返回状态的趋势方向与交易信号"""
     signal = StateMachine.STATE_SIGNAL_MAP.get(state, StateMachine.SIGNAL_WATCH)
