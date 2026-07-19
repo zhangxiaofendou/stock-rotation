@@ -293,26 +293,6 @@ def _render_kline_chart(kline_df: pd.DataFrame, sector_name: str):
     st.plotly_chart(fig, width="stretch")
 
 
-def _make_state_bar(state_counts: dict) -> go.Figure:
-    """创建状态分布迷你柱状图"""
-    all_states = [
-        "①领涨减速", "②稳健上行", "③加速冲顶",
-        "④强转弱", "⑤中性震荡", "⑥弱转强",
-        "⑦持续杀跌", "⑧下跌中继", "⑨底背离",
-    ]
-    counts = [state_counts.get(s, 0) for s in all_states]
-    colors = [STATE_COLORS.get(s, "#9E9E9E") for s in all_states]
-
-    fig = go.Figure(go.Bar(x=all_states, y=counts, marker_color=colors, text=counts, textposition="auto"))
-    fig.update_layout(
-        height=250,
-        margin={"l": 10, "r": 10, "t": 10, "b": 60},
-        xaxis={"tickangle": 30},
-        yaxis_title="板块数",
-    )
-    return fig
-
-
 def _render_heatmap(state_df: pd.DataFrame):
     """渲染九宫格热力图（自定义HTML表格）"""
     if state_df is None or state_df.empty:
@@ -605,13 +585,6 @@ def render():
         st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向")
 
         _render_heatmap(state_df)
-
-        # 状态分布柱状图
-        state_counts = {}
-        for s in state_df["state"].value_counts().index:
-            state_counts[s] = int(state_df["state"].value_counts()[s])
-        fig_bar = _make_state_bar(state_counts)
-        st.plotly_chart(fig_bar, width="stretch")
 
         # ================================================================
         # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
