@@ -19,6 +19,7 @@ from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.scoring import SectorScoring
 from model.transition import TransitionRules
+from model.mirror_pair import MirrorPair
 from config.sector_map import get_sector_name
 from config.settings import PARQUET_DIR
 from dashboard.components.state_card import (
@@ -63,6 +64,87 @@ SCORE_WEIGHT_NOTE = (
 # 缓存版本号：当评分逻辑或返回列结构发生变化时递增，
 # 强制使 Streamlit 的缓存键失效，避免旧缓存返回缺列数据。
 CACHE_VERSION = 2
+
+
+CROWDING_LEVELS = (
+    (90, "极度拥挤", "#C62828", "成交活跃度处于近一年极高位置，追高需警惕回撤放大。"),
+    (75, "偏拥挤", "#EF6C00", "成交活跃度偏高，建议结合趋势持续性与镜像确认控制追高风险。"),
+)
+
+
+def _get_crowding_assessment(score):
+    """将 0-100 拥挤度映射为解释性标签，不参与状态机或综合评分。"""
+    if score is None or pd.isna(score):
+        return "数据不足", "#757575", "暂无有效拥挤度数据。"
+    score = float(score)
+    for threshold, label, color, note in CROWDING_LEVELS:
+        if score >= threshold:
+            return label, color, note
+    if score < 25:
+        return "低关注", "#546E7A", "成交活跃度处于较低位置，当前信号的参与度确认偏弱。"
+    return "正常", "#2E7D32", "成交活跃度处于常态区间。"
+
+
+@st.cache_data(ttl=3600)
+def load_mirror_confirmation(sector_code: str, sector_state: str):
+    """读取选中板块的同组镜像确认；仅作为辅助证据，不改变主状态。"""
+    try:
+        parquet_store, sqlite_store = get_stores()
+        state_machine = StateMachine(parquet_store, sqlite_store)
+        mirror = MirrorPair(sqlite_store, state_machine)
+        is_valid, mirror_code, confidence = mirror.validate_signal(sector_code, sector_state)
+        return {
+            "available": True,
+            "is_valid": bool(is_valid),
+            "mirror_code": mirror_code,
+            "confidence": float(confidence or 0),
+        }
+    except Exception:
+        return {"available": False, "is_valid": False, "mirror_code": None, "confidence": 0.0}
+
+
+def _render_confirmation_risk_panel(selected_code: str, sector_state: str, score_row: pd.Series | None):
+    """展示不参与主评分的辅助确认与风险信息。"""
+    st.subheader("确认与风险因子")
+    st.caption("以下因子用于解释和风险提示，不改变九宫格状态、综合评分或原有操作建议。")
+
+    crowding_score = score_row.get("crowding_score") if score_row is not None else None
+    crowding_label, crowding_color, crowding_note = _get_crowding_assessment(crowding_score)
+    mirror = load_mirror_confirmation(selected_code, sector_state)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if crowding_score is None or pd.isna(crowding_score):
+            st.metric("拥挤度", "N/A")
+        else:
+            st.metric("拥挤度", f"{float(crowding_score):.1f}/100")
+        st.markdown(
+            f"<span style='font-weight:700;color:{crowding_color};'>● {crowding_label}</span>",
+            unsafe_allow_html=True,
+        )
+        st.caption(crowding_note)
+
+    with col2:
+        if not mirror["available"]:
+            st.metric("镜像确认", "暂不可用")
+            st.caption("镜像数据暂不可用，不对当前状态做任何推断。")
+        elif mirror["mirror_code"]:
+            mirror_name = get_sector_name(mirror["mirror_code"])
+            st.metric("镜像确认", "已确认" if mirror["is_valid"] else "未确认")
+            st.caption(f"同组对立状态：{mirror_name}（置信度 {mirror['confidence']:.0%}）")
+        elif sector_state in {"④强转弱", "⑥弱转强", "③加速冲顶", "⑦持续杀跌"}:
+            st.metric("镜像确认", "未发现")
+            st.caption("当前为可验证状态，但关联组内未发现对立状态板块。")
+        else:
+            st.metric("镜像确认", "不适用")
+            st.caption("该状态不属于镜像交叉验证范围。")
+
+    with st.expander("指标口径与当前缺口"):
+        st.markdown(
+            "- **拥挤度**：成交额分位（60%）与成交量分位（40%）的近 250 个交易日加权结果。\n"
+            "- **镜像确认**：只在关联板块组内检查 ④↔⑥、③↔⑦ 的对立状态。\n"
+            "- **尚未接入**：真实板块资金流、分化度、研报共识；数据未形成稳定批量口径时不以默认中性值替代。"
+        )
 
 
 def _render_score_breakdown(score_row: pd.Series):
@@ -674,6 +756,9 @@ def render():
             # 评分明细：4 维度分值 + 综合评分 + 权重
             if _detail_score_row is not None:
                 _render_score_breakdown(_detail_score_row)
+
+            # 辅助确认与风险：仅解释主信号，不改变九宫格和评分口径。
+            _render_confirmation_risk_panel(selected_code, info["state"], _detail_score_row)
 
         # ================================================================
         # K线图
