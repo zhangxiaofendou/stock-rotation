@@ -581,9 +581,15 @@ def render():
         st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向　·　点击方块按状态筛选板块")
 
         clicked = _render_heatmap_clickable(state_df, key="rotation_hm")
-        if clicked:
+        # 仅接受非空字符串：防御 components.html 在不同 Streamlit 版本下
+        # 首次回传时可能返回 None / True / 0 等非标值，避免脏值进 session_state
+        if isinstance(clicked, str) and clicked:
             st.session_state["rotation_hm_state"] = clicked
         selected_state = st.session_state.get("rotation_hm_state", None)
+        # 防御：清理老 session 中残留的非字符串脏值
+        if not isinstance(selected_state, str):
+            st.session_state["rotation_hm_state"] = None
+            selected_state = None
 
         if selected_state:
             n = int((state_df["state"] == selected_state).sum())
