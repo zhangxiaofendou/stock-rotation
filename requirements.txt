@@ -6,6 +6,9 @@ pyarrow>=12.0.0
 openpyxl>=3.0.0
 requests>=2.28.0
 lxml>=4.9.0
-streamlit>=1.36.0
+# 锁定到 1.59.2：本地测试通过的版本，避免云端装到 API 不同的最新版再次翻车
+# （历史教训：>=1.36.0 在云端被装到不支持 components.html(key=...) 的旧版，
+#  以及回传非字符串值的版本，导致 TypeError）
+streamlit==1.59.2
 plotly>=5.18.0
 baostock>=0.8.8
