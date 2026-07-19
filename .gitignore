@@ -52,6 +52,9 @@ data/storage/notification_subs.json
 # Notification channel credentials — independent config, never commit
 config/notification.json
 
+# Optional second data source (Tushare) token config — never commit
+config/tushare.json
+
 # AI module LLM API credentials — independent config, never commit
 config/ai_config.json
 config/notification.yaml

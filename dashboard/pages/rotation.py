@@ -34,6 +34,7 @@ from dashboard.pages.stock_drill import render as render_stock_drill
 from dashboard.components.nav_state import persistent_tabs
 from signal_tracker.performance import get_sector_signal_summary
 from ai.consensus import compute_sector_consensus
+from model.confirmation import arbitrate_sector
 
 # 状态颜色映射
 STATE_BG_COLORS = {
@@ -141,6 +142,12 @@ def _render_confirmation_risk_panel(selected_code: str, sector_state: str, score
             st.metric("镜像确认", "不适用")
             st.caption("该状态不属于镜像交叉验证范围。")
 
+    # ---- 资金流 + 分化度（每日管线落盘，PRD §5.6.2 确认因子）----
+    _render_flow_divergence_rows(selected_code)
+
+    # ---- 信号仲裁横幅（九宫格 + 资金流 + 研报 三路仲裁）----
+    _render_arbitration_banner(selected_code, sector_state)
+
     # ---- AI：研报/新闻共识（纯规则，PRD §7.4 / §5.6.5）----
     _render_research_consensus_card(selected_code)
 
@@ -148,11 +155,99 @@ def _render_confirmation_risk_panel(selected_code: str, sector_state: str, score
         st.markdown(
             "- **拥挤度**：成交额分位（60%）与成交量分位（40%）的近 250 个交易日加权结果。\n"
             "- **镜像确认**：只在关联板块组内检查 ④↔⑥、③↔⑦ 的对立状态。\n"
+            "- **资金流 / 分化度**：来自每日管线落盘的 `sector_fund_flow` / `sector_divergence` 表；"
+            "离线/未更新时显示「暂无」，不臆造中性值。\n"
             "- **研报/新闻共识**：评级上调潮、目标价上调幅度、覆盖券商数变化、评级分歧度，"
             "由 `research_reports` 结构化存储的研报经纯规则计算（每条结论可追溯原文）；"
             "无研报数据时显示「暂无」。\n"
-            "- **尚未接入**：真实板块资金流、分化度；数据未形成稳定批量口径时不以默认中性值替代。"
+            "- **信号仲裁**：九宫格 × 资金流 × 研报 三路信号仲裁，仅做确认/降级/否决，"
+            "不改变九宫格状态或综合评分。"
         )
+
+
+def _render_flow_divergence_rows(selected_code: str):
+    """在「确认与风险因子」中展示资金流与分化度（来自每日管线落盘）。"""
+    sqlite = SQLiteStore()
+    ff_df = sqlite.get_sector_fund_flow(sector_code=selected_code)
+    dv_df = sqlite.get_sector_divergence(sector_code=selected_code)
+
+    ff_signal = ff_df.iloc[0]["signal"] if (ff_df is not None and not ff_df.empty) else None
+    ff_date = ff_df.iloc[0]["date"] if (ff_df is not None and not ff_df.empty) else None
+    dv_val = dv_df.iloc[0]["divergence"] if (dv_df is not None and not dv_df.empty) else None
+    dv_date = dv_df.iloc[0]["date"] if (dv_df is not None and not dv_df.empty) else None
+
+    col1, col2 = st.columns(2)
+    with col1:
+        if ff_signal is None:
+            st.metric("资金流", "暂无")
+            st.caption("每日管线未落盘该板块资金流（离线/未更新）。")
+        else:
+            label = {"正向": "净流入·正向", "反向": "净流出·反向", "中性": "中性"}.get(ff_signal, ff_signal)
+            color = {"正向": "#2E7D32", "反向": "#C62828", "中性": "#757575"}.get(ff_signal, "#757575")
+            st.metric("资金流", label)
+            st.markdown(
+                f"<span style='font-weight:700;color:{color};'>● {label}</span>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"数据日期 {ff_date}")
+    with col2:
+        if dv_val is None:
+            st.metric("分化度", "暂无")
+            st.caption("每日管线未落盘该板块分化度（离线/未更新）。")
+        else:
+            # 分化度低 → 成分股走势一致（强势健康）；高 → 分歧大（可能退潮）
+            if dv_val < 0.02:
+                assess, color = "一致性高（健康）", "#2E7D32"
+            elif dv_val < 0.04:
+                assess, color = "一致性中等", "#F9A825"
+            else:
+                assess, color = "分歧偏大（留意退潮）", "#C62828"
+            st.metric("分化度", f"{dv_val:.3f}")
+            st.markdown(
+                f"<span style='font-weight:700;color:{color};'>● {assess}</span>",
+                unsafe_allow_html=True,
+            )
+            st.caption(f"数据日期 {dv_date}")
+
+
+def _render_arbitration_banner(selected_code: str, sector_state: str):
+    """展示九宫格 × 资金流 × 研报 三路信号仲裁结果（仅确认/降级/否决）。"""
+    st.markdown("---")
+    st.markdown("##### ⚖️ 信号仲裁（九宫格 × 资金流 × 研报）")
+    st.caption("三路信号交叉验证：仅做确认/降级/否决，不改变九宫格状态或综合评分。")
+
+    try:
+        arb = arbitrate_sector(selected_code, sector_state)
+    except Exception as e:
+        st.warning(f"仲裁计算失败：{e}")
+        return
+
+    conf = arb.get("confidence", "强确认")
+    conf_color = {
+        "强确认": "#2E7D32",
+        "弱确认": "#F9A825",
+        "否决":   "#C62828",
+    }.get(conf, "#757575")
+
+    final_action = arb.get("final_action", "—")
+    st.markdown(
+        f"<div style='padding:8px 12px;border-radius:8px;background:#F5F5F5;"
+        f"border-left:4px solid {conf_color};'>"
+        f"<b>仲裁结论：</b><span style='font-weight:700;color:{conf_color};'>{conf}</span>"
+        f"　|　<b>最终动作：</b>{final_action}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+    st.caption(arb.get("reason", ""))
+
+    # 三路信号明细
+    factors = arb.get("factors", {})
+    ff = factors.get("fund_flow", "未获取")
+    rp = factors.get("report", "未获取")
+    st.caption(
+        f"九宫格：{sector_state}（{arb.get('original_action','—')}）　|　"
+        f"资金流：{ff}　|　研报：{rp}"
+    )
 
 
 @st.cache_data(ttl=3600)

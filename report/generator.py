@@ -335,6 +335,22 @@ def _gather_advice(sm: StateMachine, as_of_date: str,
     return out
 
 
+def _gather_arbitration(state_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+    """采集信号仲裁概览（九宫格 × 资金流 × 研报 三路仲裁计数）。"""
+    out: Dict[str, Any] = {"ok": False, "counts": {}, "n": 0}
+    try:
+        from model.confirmation import arbitrate_all
+        if state_df is None or state_df.empty:
+            return out
+        res = arbitrate_all(state_df)
+        out["counts"] = res.get("counts", {})
+        out["n"] = res.get("n", 0)
+        out["ok"] = True
+    except Exception as e:
+        logger.warning("采集信号仲裁概览失败: %s", e)
+    return out
+
+
 def _gather_performance(sqlite: SQLiteStore) -> Dict[str, Any]:
     out: Dict[str, Any] = {"ok": False}
     try:
@@ -651,6 +667,18 @@ def _build_html(r: Dict[str, Any]) -> str:
     else:
         parts.append('<p class="muted">（未检测到显著风险预警。）</p>')
 
+    # 8) 信号仲裁概览
+    arb = r.get("arbitration", {}) or {}
+    if arb.get("ok"):
+        c = arb.get("counts", {})
+        parts.append('<h2>八、信号仲裁概览</h2>')
+        parts.append(
+            f'<p class="note">九宫格 × 资金流 × 研报 三路信号交叉验证：'
+            f'强确认 <b>{c.get("强确认", 0)}</b> ／ 弱确认 <b>{c.get("弱确认", 0)}</b> ／ '
+            f'否决 <b>{c.get("否决", 0)}</b>（共 {arb.get("n", 0)} 板块）。'
+            f'仅做确认/降级/否决，不改变九宫格状态或综合评分。</p>'
+        )
+
     parts.append('</div>')
     return "".join(parts)
 
@@ -700,6 +728,7 @@ def generate_report(as_of_date: Optional[str] = None) -> Dict[str, Any]:
         "transitions": _gather_transitions(sqlite, as_of_date),
         "mirrors": _gather_mirrors(mp, as_of_date),
         "advice": _gather_advice(sm, as_of_date, state_df=state_df),
+        "arbitration": _gather_arbitration(state_df=state_df),
         "performance": _gather_performance(sqlite),
         "risks": _gather_risks(sm, cb, as_of_date, meta, state_df=state_df, market_status=market_status),
     }

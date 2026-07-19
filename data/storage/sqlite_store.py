@@ -186,6 +186,39 @@ CREATE INDEX IF NOT EXISTS idx_signal_events_path_date ON signal_events(from_sta
 CREATE INDEX IF NOT EXISTS idx_signal_performance_path_date ON signal_performance(from_state, to_state, event_date DESC);
 CREATE INDEX IF NOT EXISTS idx_signal_performance_date ON signal_performance(event_date DESC);
 CREATE INDEX IF NOT EXISTS idx_portfolio_transactions_security_date ON portfolio_transactions(security_code, trade_date DESC);
+
+-- 板块资金流（每日管线落盘，来自 AkShare 行业资金流排名）
+CREATE TABLE IF NOT EXISTS sector_fund_flow (
+    sector_code TEXT NOT NULL,          -- 板块代码
+    date        TEXT NOT NULL,          -- 数据日期
+    signal      TEXT,                   -- 资金流信号：正向/中性/反向
+    rank        INTEGER,                -- 主力净流入全市场排名（越小越强）
+    rank_change INTEGER,                -- 相对前序窗口排名变化（正=改善）
+    trend       TEXT,                   -- 资金流趋势：改善/恶化/稳定
+    updated_at  TEXT DEFAULT (datetime('now', 'localtime')),
+    PRIMARY KEY (sector_code, date)
+);
+
+-- 板块内分化度（一致性指标，每日管线落盘）
+CREATE TABLE IF NOT EXISTS sector_divergence (
+    sector_code TEXT NOT NULL,          -- 板块代码
+    date        TEXT NOT NULL,          -- 数据日期
+    divergence  REAL,                   -- 分化度：成分股涨幅标准差 / 指数日内波动率替代
+    method      TEXT,                   -- 计算方法：component / intraday_vol
+    updated_at  TEXT DEFAULT (datetime('now', 'localtime')),
+    PRIMARY KEY (sector_code, date)
+);
+
+-- 管线运行日志（运行保障 / 可观测性）
+CREATE TABLE IF NOT EXISTS pipeline_run_log (
+    run_id      TEXT PRIMARY KEY,       -- 运行标识（ISO 时间戳）
+    started_at  TEXT,                   -- 开始时间
+    finished_at TEXT,                   -- 结束时间
+    status      TEXT,                   -- 状态：success / partial / failed
+    target_date TEXT,                   -- 本次目标交易日
+    steps       TEXT,                   -- 各步骤摘要（JSON 字符串）
+    error       TEXT                    -- 失败原因（status=failed 时填充）
+);
 """
 
 
@@ -423,6 +456,145 @@ class SQLiteStore:
             )
             row = cursor.fetchone()
             return row is not None and row[0] == 1
+        finally:
+            conn.close()
+
+    def count_trade_calendar(self) -> int:
+        """返回交易日历记录数（用于判断是否已初始化）。"""
+        conn = self._get_conn()
+        try:
+            return conn.execute("SELECT COUNT(*) FROM trade_calendar").fetchone()[0]
+        finally:
+            conn.close()
+
+    # ============================================================
+    # 板块资金流
+    # ============================================================
+    def upsert_sector_fund_flow(self, rows: List[Dict]):
+        """批量写入/更新板块资金流（每日管线落盘）。"""
+        if not rows:
+            return
+        conn = self._get_conn()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO sector_fund_flow "
+                "(sector_code, date, signal, rank, rank_change, trend, updated_at) "
+                "VALUES (:sector_code, :date, :signal, :rank, :rank_change, :trend, "
+                "datetime('now', 'localtime'))",
+                rows,
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"写入板块资金流失败: {e}")
+        finally:
+            conn.close()
+
+    def get_sector_fund_flow(self, sector_code: str = None, date: str = None) -> pd.DataFrame:
+        """查询板块资金流；不传条件返回全部（按日期倒序、排名升序）。"""
+        conn = self._get_conn()
+        try:
+            q = "SELECT * FROM sector_fund_flow WHERE 1=1"
+            params = []
+            if sector_code:
+                q += " AND sector_code=?"
+                params.append(sector_code)
+            if date:
+                q += " AND date=?"
+                params.append(date)
+            q += " ORDER BY date DESC, rank ASC"
+            return pd.read_sql_query(q, conn, params=params)
+        finally:
+            conn.close()
+
+    def get_latest_fund_flow_date(self) -> Optional[str]:
+        """返回资金流表最新日期（无数据返回 None）。"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT date FROM sector_fund_flow ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    # ============================================================
+    # 板块分化度
+    # ============================================================
+    def upsert_sector_divergence(self, rows: List[Dict]):
+        """批量写入/更新板块分化度（每日管线落盘）。"""
+        if not rows:
+            return
+        conn = self._get_conn()
+        try:
+            conn.executemany(
+                "INSERT OR REPLACE INTO sector_divergence "
+                "(sector_code, date, divergence, method, updated_at) "
+                "VALUES (:sector_code, :date, :divergence, :method, "
+                "datetime('now', 'localtime'))",
+                rows,
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"写入板块分化度失败: {e}")
+        finally:
+            conn.close()
+
+    def get_sector_divergence(self, sector_code: str = None, date: str = None) -> pd.DataFrame:
+        """查询板块分化度；不传条件返回全部（按日期倒序）。"""
+        conn = self._get_conn()
+        try:
+            q = "SELECT * FROM sector_divergence WHERE 1=1"
+            params = []
+            if sector_code:
+                q += " AND sector_code=?"
+                params.append(sector_code)
+            if date:
+                q += " AND date=?"
+                params.append(date)
+            q += " ORDER BY date DESC"
+            return pd.read_sql_query(q, conn, params=params)
+        finally:
+            conn.close()
+
+    def get_latest_divergence_date(self) -> Optional[str]:
+        """返回分化度表最新日期（无数据返回 None）。"""
+        conn = self._get_conn()
+        try:
+            row = conn.execute(
+                "SELECT date FROM sector_divergence ORDER BY date DESC LIMIT 1"
+            ).fetchone()
+            return row[0] if row else None
+        finally:
+            conn.close()
+
+    # ============================================================
+    # 管线运行日志（运行保障 / 可观测性）
+    # ============================================================
+    def log_pipeline_run(self, run_id: str, started_at: str, finished_at: str,
+                         status: str, target_date: str, steps: str, error: str = None):
+        """写入一条管线运行记录（INSERT OR REPLACE）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO pipeline_run_log "
+                "(run_id, started_at, finished_at, status, target_date, steps, error) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (run_id, started_at, finished_at, status, target_date, steps, error),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.error(f"写入管线运行日志失败: {e}")
+        finally:
+            conn.close()
+
+    def get_last_pipeline_runs(self, n: int = 5) -> List[Dict]:
+        """返回最近 n 条管线运行记录（按开始时间倒序）。"""
+        conn = self._get_conn()
+        try:
+            cursor = conn.execute(
+                "SELECT * FROM pipeline_run_log ORDER BY started_at DESC LIMIT ?", (n,)
+            )
+            return [dict(r) for r in cursor.fetchall()]
         finally:
             conn.close()
 

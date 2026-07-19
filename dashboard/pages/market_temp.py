@@ -19,7 +19,7 @@ from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.circuit_breaker import CircuitBreaker
-from config.sector_map import SECTOR_GROUPS
+from config.sector_map import SECTOR_GROUPS, get_sector_name
 
 # 状态颜色
 STATE_COLORS = {
@@ -120,6 +120,61 @@ def render():
         _render_market_overview()
     elif active == "镜像对监控":
         render_mirror(show_header=False)
+
+
+def _render_fund_flow_map():
+    """资金流向地图：展示当日行业资金流净流入/净流出排名前列板块（来自每日管线落盘）。"""
+    st.subheader("资金流向地图")
+    st.caption("行业主力资金净流入排名，来自每日管线落盘的 sector_fund_flow；离线/未更新时显示提示。")
+
+    sqlite = SQLiteStore()
+    latest = sqlite.get_latest_fund_flow_date()
+    if latest is None:
+        st.info("资金流数据尚未落盘（每日管线在线运行时自动填充；当前环境无数据）。")
+        return
+    df = sqlite.get_sector_fund_flow(date=latest)
+    if df is None or df.empty:
+        st.info("资金流数据尚未落盘。")
+        return
+
+    df = df.copy()
+    df["name"] = df["sector_code"].map(lambda c: get_sector_name(c))
+    df = df.dropna(subset=["rank"]).sort_values("rank")
+    if df.empty:
+        st.info("资金流数据无有效排名。")
+        return
+
+    top_in = df.head(10)
+    top_out = df.tail(10).sort_values("rank", ascending=False)
+    sig_color = {"正向": "#2E7D32", "反向": "#C62828", "中性": "#9E9E9E"}
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown(f"**净流入前列（{latest}）**")
+        fig = go.Figure()
+        fig.add_trace(go.Bar(
+            x=top_in["rank"], y=top_in["name"], orientation="h",
+            marker_color=top_in["signal"].map(lambda s: sig_color.get(s, "#9E9E9E")),
+            text=top_in["signal"], textposition="auto",
+        ))
+        fig.update_layout(
+            height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+            xaxis_title="净流入排名（越小越强）", yaxis={"autorange": "reversed"},
+        )
+        st.plotly_chart(fig, width="stretch")
+    with col2:
+        st.markdown("**净流出前列**")
+        fig2 = go.Figure()
+        fig2.add_trace(go.Bar(
+            x=top_out["rank"], y=top_out["name"], orientation="h",
+            marker_color=top_out["signal"].map(lambda s: sig_color.get(s, "#9E9E9E")),
+            text=top_out["signal"], textposition="auto",
+        ))
+        fig2.update_layout(
+            height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+            xaxis_title="净流入排名（越大越弱）", yaxis={"autorange": "reversed"},
+        )
+        st.plotly_chart(fig2, width="stretch")
 
 
 def _render_market_overview():
@@ -289,6 +344,11 @@ def _render_market_overview():
                 "卖出占比": f"{s['sell_count']/max(s['total'],1):.1%}",
             })
         st.dataframe(pd.DataFrame(table_data), width="stretch", hide_index=True)
+
+    # ================================================================
+    # 资金流向地图（来自每日管线落盘的 sector_fund_flow）
+    # ================================================================
+    _render_fund_flow_map()
 
     # ================================================================
     # 触发条件详情

@@ -79,3 +79,17 @@ def ensure_ai_data() -> dict:
     except Exception as e:
         logger.warning("AI 示例数据初始化失败: %s", e)
         return {"skipped": False, "research": 0, "news": 0, "error": str(e)}
+
+
+def ensure_trade_calendar() -> bool:
+    """确保交易日历（含法定节假日）已入库（云端自初始化）。
+
+    优先 AkShare 拉取，失败回退 weekday 近似；表已非空则直接跳过。
+    每日管线 main() 开头也会调用，保证最晚在首次自动运行时补齐。
+    """
+    try:
+        from data.daily_pipeline import ensure_trade_calendar as _ensure
+        return _ensure()
+    except Exception as e:
+        logger.warning("交易日历初始化失败: %s", e)
+        return False

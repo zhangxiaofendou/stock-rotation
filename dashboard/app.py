@@ -7,6 +7,7 @@ Streamlit多页应用，侧边栏导航。
 import streamlit as st
 import sys
 import os
+from typing import Dict, Any
 
 # 确保项目根目录在 Python path 中
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -94,6 +95,67 @@ def run_manual_data_update():
         return False, f"刷新失败：{e}"
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def get_run_observability() -> Dict[str, Any]:
+    """汇总运行保障信息：最近一次管线运行、下次计划运行、双源校验状态。"""
+    out: Dict[str, Any] = {
+        "last_run": None,
+        "next_run": "—",
+        "dual_source": "未配置",
+    }
+    try:
+        from data.storage.sqlite_store import SQLiteStore
+        from data.calendar import TradeCalendar
+        from datetime import datetime, timedelta
+        sqlite = SQLiteStore()
+        runs = sqlite.get_last_pipeline_runs(1)
+        if runs:
+            r = runs[0]
+            out["last_run"] = {
+                "status": r.get("status"),
+                "finished_at": r.get("finished_at"),
+                "target_date": r.get("target_date"),
+                "error": r.get("error"),
+                "steps": r.get("steps"),
+            }
+            # 双源校验状态从 steps 中解析
+            steps = r.get("steps") or ""
+            for seg in steps.split(";"):
+                seg = seg.strip()
+                if seg.startswith("双源校验:"):
+                    out["dual_source"] = seg.split(":", 1)[1].strip()
+        # 下次计划运行：下一个交易日（每日 22:00 自动更新 + 07:30 兜底）
+        today = datetime.now().strftime("%Y-%m-%d")
+        if sqlite.count_trade_calendar() > 0:
+            nxt = TradeCalendar().next_trading_day(today, offset=1)
+            if nxt:
+                out["next_run"] = f"{nxt} 22:00"
+    except Exception as e:
+        logger.warning(f"运行保障信息读取失败: {e}")
+    return out
+
+
+def _render_run_observability():
+    """侧栏「运行保障」区块：最近运行 / 下次运行 / 失败原因 / 双源校验。"""
+    st.markdown("### 🛠️ 运行保障")
+    info = get_run_observability()
+
+    last = info.get("last_run")
+    if last:
+        status = last.get("status")
+        color = {"success": "🟢", "partial": "🟡", "failed": "🔴"}.get(status, "⚪")
+        st.markdown(f"{color} **最近运行**：{last.get('finished_at') or '—'}")
+        st.caption(f"目标交易日 {last.get('target_date') or '—'} ｜ 双源校验：{info.get('dual_source')}")
+        if status == "failed" and last.get("error"):
+            st.error(f"失败原因：{last['error'][:200]}")
+        elif status == "partial":
+            st.warning("部分步骤未完成，详见日志。")
+    else:
+        st.info("暂无管线运行记录")
+
+    st.caption(f"📅 下次计划运行：{info.get('next_run')}")
+
+
 def main():
     """主入口"""
     # 页面配置
@@ -150,6 +212,11 @@ def main():
             )
         else:
             st.info("暂无数据新鲜度记录")
+
+        st.markdown("---")
+
+        # 运行保障（可观测性）：最近运行 / 下次运行 / 失败原因 / 双源校验
+        _render_run_observability()
 
         st.markdown("---")
 

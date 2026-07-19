@@ -61,29 +61,88 @@ TREND_DIR = os.path.join(str(PARQUET_DIR), "indicators", "trend")
 
 def is_trading_day(today: str) -> bool:
     """
-    判断是否为交易日（轻量版）。
+    判断是否为交易日。
 
-    周一至周五视为交易日；法定节假日会照常运行，但 AkShare 无新数据、
-    下游各步骤自动跳过，不会误报错。完整的交易日历（含节假日）见
-    data/calendar.py，后续可在此替换 weekday 判断。
+    优先查已入库的**真实交易日历**（含法定节假日，data/calendar.py +
+    trade_calendar 表）；日历为空或过旧时回退到「周一至周五」近似，保证
+    管线在任何环境下都能跑（节假日照常运行，AkShare 无新数据则下游自动跳过）。
     """
+    try:
+        from data.calendar import TradeCalendar
+        from data.storage.sqlite_store import SQLiteStore
+        if SQLiteStore().count_trade_calendar() > 0:
+            return TradeCalendar().is_trading_day(today)
+    except Exception as e:
+        logger.debug(f"真实交易日历查询失败，回退 weekday：{e}")
     return datetime.strptime(today, "%Y-%m-%d").weekday() < 5
 
 
 def latest_trading_day(today: str) -> str:
     """
-    返回 ≤ today 的最近交易日（weekday 回退法）。
+    返回 ≤ today 的最近交易日。
 
-    用于决定"本次更新应补到哪个交易日收盘"。非交易日则向前回退到
-    最近的 weekday。注：与 is_trading_day 保持一致的轻量实现，不依赖
-    需联网入库的完整交易日历。
+    优先用真实交易日历（含节假日）；日历为空或最近 30 天无任何交易日
+    （日历过旧）时回退 weekday 法。
     """
+    try:
+        from data.calendar import TradeCalendar
+        from data.storage.sqlite_store import SQLiteStore
+        if SQLiteStore().count_trade_calendar() > 0:
+            cal = TradeCalendar()
+            d = datetime.strptime(today, "%Y-%m-%d")
+            for _ in range(30):
+                if cal.is_trading_day(d.strftime("%Y-%m-%d")):
+                    return d.strftime("%Y-%m-%d")
+                d -= timedelta(days=1)
+            logger.debug("真实日历最近 30 天无交易日（可能过旧），回退 weekday")
+    except Exception as e:
+        logger.debug(f"真实交易日历查询失败，回退 weekday：{e}")
     d = datetime.strptime(today, "%Y-%m-%d")
     for _ in range(10):
         if d.weekday() < 5:
             return d.strftime("%Y-%m-%d")
         d -= timedelta(days=1)
     return today
+
+
+def ensure_trade_calendar():
+    """确保交易日历已入库（含法定节假日）。
+
+    优先 AkShare 拉取（在线）；失败/离线则回填 2000-2030 的 weekday 近似
+    作为安全网。仅在 trade_calendar 表为空时执行，幂等。
+    """
+    from data.storage.sqlite_store import SQLiteStore
+    sqlite = SQLiteStore()
+    if sqlite.count_trade_calendar() > 0:
+        logger.info("交易日历已存在（%s 条），跳过初始化。", sqlite.count_trade_calendar())
+        return True
+    try:
+        from data.calendar import TradeCalendar
+        from data.sources.akshare_source import AkShareSource
+        ok = TradeCalendar(AkShareSource(), sqlite).fetch_and_store()
+        if ok:
+            logger.info("交易日历通过 AkShare 初始化完成。")
+            return True
+    except Exception as e:
+        logger.warning(f"AkShare 交易日历拉取失败，回退 weekday 近似：{e}")
+    _build_weekday_calendar(sqlite)
+    return True
+
+
+def _build_weekday_calendar(sqlite: SQLiteStore):
+    """离线回退：把 2000-01-01 ~ 2030-12-31 的周一至周五写入交易日历。
+    不含法定节假日，仅作安全网。"""
+    from datetime import date
+    rows = []
+    d = date(2000, 1, 1)
+    end = date(2030, 12, 31)
+    while d <= end:
+        if d.weekday() < 5:
+            rows.append((d.strftime("%Y-%m-%d"), 1, d.weekday()))
+        d += timedelta(days=1)
+    if rows:
+        sqlite.insert_trade_calendar_batch(rows)
+        logger.info(f"离线 weekday 近似日历已写入 {len(rows)} 条（不含法定节假日）。")
 
 
 def _max_date_in_dir(d: str, col: str = "date"):
@@ -190,6 +249,81 @@ def enrich_signal_performance():
         logger.error(f"信号后续表现补全失败: {e}")
 
 
+def enrich_fund_flow(target: str):
+    """计算每个板块的资金流信号并落盘（依赖 AkShare 行业资金流排名，在线可用）。
+
+    离线 / 接口异常时探测一次即整体跳过，避免逐板块重试卡顿；不阻断管线。
+    """
+    try:
+        from indicators.money_flow import MoneyFlowIndicator
+        parquet, sqlite = ParquetStore(), SQLiteStore()
+        mfi = MoneyFlowIndicator(parquet, sqlite, AkShareSource())
+
+        # 先探测一次在线可用性：拿不到今日排名则整体跳过
+        probe = mfi.calc_sector_fund_flow_rank("今日")
+        if probe is None or probe.empty:
+            logger.info("资金流数据不可用（离线/接口异常），跳过落盘。")
+            return
+
+        rows = []
+        for code in SW_LEVEL2_MAP:
+            rec = {"sector_code": code, "date": target, "signal": "中性"}
+            try:
+                sig = mfi.calc_fund_flow_signal(code)
+                rec["signal"] = sig or "中性"
+                trend = mfi.calc_fund_flow_trend(code, days=5)
+                if trend:
+                    rec["rank"] = trend.get("current_rank")
+                    rec["rank_change"] = trend.get("rank_change")
+                    rec["trend"] = trend.get("trend")
+            except Exception:
+                pass
+            rows.append(rec)
+        sqlite.upsert_sector_fund_flow(rows)
+        logger.info(f"资金流落盘完成: {len(rows)} 个板块")
+    except Exception as e:
+        logger.error(f"资金流落盘失败: {e}")
+        raise
+
+
+def enrich_divergence(target: str):
+    """计算每个板块的分化度（一致性指标）并落盘。
+
+    无成分股时用指数日内波动率替代，离线即可运行（依赖 index_hist parquet）。
+    """
+    try:
+        from indicators.divergence import SectorDivergence
+        parquet, sqlite = ParquetStore(), SQLiteStore()
+        sd = SectorDivergence(parquet, sqlite)
+        rows = []
+        ok = skip = 0
+        for code in SW_LEVEL2_MAP:
+            try:
+                d = sd.calc_divergence(code, target)
+                if d is None:
+                    skip += 1
+                    continue
+                rows.append({
+                    "sector_code": code, "date": target,
+                    "divergence": float(d), "method": "auto",
+                })
+                ok += 1
+            except Exception as e:
+                skip += 1
+        if rows:
+            sqlite.upsert_sector_divergence(rows)
+        logger.info(f"分化度落盘完成: 成功 {ok}, 跳过 {skip}")
+    except Exception as e:
+        logger.error(f"分化度落盘失败: {e}")
+        raise
+
+
+def enrich_confirmation_factors(target: str):
+    """P3.4 确认因子落盘：资金流 + 分化度。任一失败不阻断另一条。"""
+    enrich_fund_flow(target)
+    enrich_divergence(target)
+
+
 def generate_daily_report():
     """管线末尾生成当日盘后报告，并按订阅推送通知（PRD 阶段 D）。
 
@@ -253,45 +387,96 @@ def run_with_retry(mod: str, tries: int = 2, backoff: int = 300) -> int:
 
 
 def main():
+    run_id = datetime.now().isoformat(timespec="seconds")
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    steps = []
+    run_status = "success"
+    run_error = None
     today = datetime.now().strftime("%Y-%m-%d")
+
+    # 0. 真实交易日历（含法定节假日）best-effort 保证已入库，供后续判断使用
+    try:
+        ensure_trade_calendar()
+        steps.append("交易日历: ok")
+    except Exception as e:
+        steps.append(f"交易日历: 跳过({e})")
+
     # 目标：补到最新交易日收盘。任意时点运行都以此为目标，天然支持"失败后续补"。
     target = latest_trading_day(today)
 
     # 幂等守卫（优先级最高）：趋势与 RS 产物均已覆盖目标交易日，说明整条管线已完成，
     # 直接跳过。这能正确覆盖「周末/节假日的正常无更新」场景（数据已是最近交易日收盘）。
-    if data_is_current(target):
-        logger.info(f"数据已为最新交易日 {target} 收盘，无需更新（幂等跳过）。")
-        # 即便行情和指标已是最新，也同步账本：首次上线、状态规则升级后可补齐历史事件。
-        sync_signal_events()
-        # 同步账本后增量补全信号后续表现，保证绩效数据不滞后。
-        enrich_signal_performance()
-        # 管线末尾生成当日盘后报告（含通知）
-        generate_daily_report()
-        return
+    try:
+        if data_is_current(target):
+            logger.info(f"数据已为最新交易日 {target} 收盘，无需更新（幂等跳过）。")
+            # 即便行情和指标已是最新，也同步账本：首次上线、状态规则升级后可补齐历史事件。
+            sync_signal_events()
+            steps.append("信号事件同步: ok")
+            # 同步账本后增量补全信号后续表现，保证绩效数据不滞后。
+            enrich_signal_performance()
+            steps.append("信号表现补全: ok")
+            # 管线末尾生成当日盘后报告（含通知）
+            generate_daily_report()
+            steps.append("盘后报告: ok")
+        else:
+            # 非交易日但数据滞后：仍补跑到最新交易日收盘（如周六补周五数据），
+            # 确保「当日更新失败 → 下一次有网时必补到最新交易日收盘」。
+            if not is_trading_day(today):
+                logger.info(
+                    f"{today} 非交易日，但数据滞后于最新交易日 {target}，执行补跑。"
+                )
 
-    # 非交易日但数据滞后：仍补跑到最新交易日收盘（如周六补周五数据），
-    # 确保「当日更新失败 → 下一次有网时必补到最新交易日收盘」。
-    if not is_trading_day(today):
-        logger.info(
-            f"{today} 非交易日，但数据滞后于最新交易日 {target}，执行补跑。"
-        )
+            logger.info(f"========== 每日全量更新管线 {today}（目标：{target} 收盘）==========")
+            # 1. 板块行情（含快照失效）—— 联网步骤，失败自动重试
+            run_with_retry("data.daily_update", tries=2, backoff=300)
+            steps.append("板块行情: ok")
+            # 2. 基准指数（RS 强依赖，必须同步）
+            update_benchmarks()
+            steps.append("基准指数: ok")
+            # 3. RS 指标 + 横截面排名
+            run_module("indicators.calc_all")
+            steps.append("RS/横截面: ok")
+            # 4. 绝对价格趋势落盘（state_machine / scoring 读取）
+            recompute_trends()
+            steps.append("价格趋势: ok")
+            # 4.5 确认因子落盘（资金流 + 分化度），无网络/无数据则优雅跳过
+            try:
+                enrich_confirmation_factors(target)
+                steps.append("确认因子: ok")
+            except Exception as e:
+                steps.append(f"确认因子: 跳过({e})")
+            # 5. 状态已经按最新指标重算，固化发生变化的状态事件供绩效/回放/报告复用。
+            sync_signal_events()
+            steps.append("信号事件同步: ok")
+            # 6. 补齐最近窗口信号事件的后续实际表现（T+5/T+20 收益、成败判定）。
+            enrich_signal_performance()
+            steps.append("信号表现补全: ok")
+            # 7. 管线末尾生成当日盘后报告（含通知）
+            generate_daily_report()
+            steps.append("盘后报告: ok")
+            logger.info(f"========== 每日全量更新管线完成 {today}（已更新至 {target} 收盘）==========")
 
-    logger.info(f"========== 每日全量更新管线 {today}（目标：{target} 收盘）==========")
-    # 1. 板块行情（含快照失效）—— 联网步骤，失败自动重试
-    run_with_retry("data.daily_update", tries=2, backoff=300)
-    # 2. 基准指数（RS 强依赖，必须同步）
-    update_benchmarks()
-    # 3. RS 指标 + 横截面排名
-    run_module("indicators.calc_all")
-    # 4. 绝对价格趋势落盘（state_machine / scoring 读取）
-    recompute_trends()
-    # 5. 状态已经按最新指标重算，固化发生变化的状态事件供绩效/回放/报告复用。
-    sync_signal_events()
-    # 6. 补齐最近窗口信号事件的后续实际表现（T+5/T+20 收益、成败判定）。
-    enrich_signal_performance()
-    # 7. 管线末尾生成当日盘后报告（含通知）
-    generate_daily_report()
-    logger.info(f"========== 每日全量更新管线完成 {today}（已更新至 {target} 收盘）==========")
+        # 8. 双源校验（AkShare/Tushare），未配置第二数据源则跳过
+        try:
+            from data.dual_source_check import run_dual_source_check
+            ds = run_dual_source_check()
+            steps.append(f"双源校验: {ds.get('status')}")
+        except Exception as e:
+            steps.append(f"双源校验: 跳过({e})")
+    except Exception as e:
+        run_status = "failed"
+        run_error = str(e)
+        logger.exception("每日管线执行失败: %s", e)
+    finally:
+        finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            from data.storage.sqlite_store import SQLiteStore
+            SQLiteStore().log_pipeline_run(
+                run_id, started_at, finished_at, run_status, target,
+                "; ".join(steps), run_error,
+            )
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
