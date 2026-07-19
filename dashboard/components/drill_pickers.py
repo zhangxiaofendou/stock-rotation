@@ -311,8 +311,16 @@ def render_transition_picker(all_states_df, key="transition_picker"):
 
     total_transitions = int(transition_types["count"].sum())
     st.markdown(f"##### 上一交易日 → 当前交易日状态切换 · 共 {total_transitions} 个板块")
+    st.caption("直接点击任意状态切换，即可筛选下方行业；再次点击其他切换可切换筛选条件。")
 
-    # 按日期 → 趋势 → 动作 层级展示
+    selection_key = f"{key}_selected"
+    valid_transitions = set(transition_types["state_change"])
+    selected_transition = st.session_state.get(selection_key, "")
+    if selected_transition not in valid_transitions:
+        selected_transition = ""
+        st.session_state.pop(selection_key, None)
+
+    # 按日期 → 趋势 → 动作 层级展示；每条列表项本身就是筛选按钮。
     from itertools import groupby
 
     for latest_date, date_group in groupby(transition_types.to_dict("records"), key=lambda r: r["latest_date"]):
@@ -328,42 +336,36 @@ def render_transition_picker(all_states_df, key="transition_picker"):
                 unsafe_allow_html=True,
             )
 
-            for row in trend_group:
+            for row_index, row in enumerate(trend_group):
                 state_chg = row["state_change"]
                 count = int(row["count"])
-                sectors = row["sectors"]
                 from_action = row["from_action"]
                 to_action = row["to_action"]
                 signal_change = (
                     f"{action_emoji.get(from_action, '')} {from_action}"
                     f" → {action_emoji.get(to_action, '')} {to_action}"
                 )
+                is_selected = state_chg == selected_transition
+                button_label = (
+                    f"✓ 当前已选 · {state_chg} · 信号：{signal_change} · {count} 个板块"
+                    if is_selected
+                    else f"{state_chg} · 信号：{signal_change} · {count} 个板块"
+                )
 
-                with st.expander(
-                    f"{state_chg} · 信号：{signal_change} · {count} 个板块",
-                    expanded=False,
+                if st.button(
+                    button_label,
+                    key=f"{key}_option_{date_str}_{trend}_{row_index}",
+                    type="primary" if is_selected else "secondary",
+                    width="stretch",
                 ):
-                    st.caption(f"前一状态信号：{from_action} → 当前状态信号：{to_action}")
-                    # 使用紧凑的列布局减少空白
-                    for i, s in enumerate(sectors[:20]):
-                        sc = all_states_df[all_states_df["sector_name"] == s]
-                        sc_state = sc.iloc[0]["state"] if not sc.empty else ""
-                        st.caption(f"• {s} [当前: {sc_state}]")
-                    if count > 20:
-                        st.caption(f"... 还有 {count - 20} 个板块")
+                    st.session_state[selection_key] = state_chg
+                    selected_transition = state_chg
+                    st.rerun()
 
         st.markdown("---")
 
-    transition_options = [""] + list(transition_types["state_change"])
-    selected_transition = st.selectbox(
-        "选择具体的状态切换",
-        options=transition_options,
-        format_func=lambda x: "请选择切换类型..." if x == "" else x,
-        key=key,
-    )
-
     if not selected_transition:
-        st.info("👆 请先选择一个状态切换类型")
+        st.info("👆 请直接点击上方任意状态切换类型")
         return None, None
 
     matching_trans = trans_df[trans_df["state_change"] == selected_transition]
