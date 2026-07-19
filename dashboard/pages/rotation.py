@@ -551,10 +551,10 @@ def render():
         点击热力图方块即可按状态筛选板块；亦可在下方切换「按状态切换筛选」。
         选中具体板块后，下方联动渲染其完整详情。
         """
-        st.subheader("九宫格板块分布热力图")
-        st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向　·　点击方块按状态筛选板块")
+        st.subheader("板块筛选与详情")
+        st.caption("选择筛选维度后查看匹配板块，并进一步打开完整详情")
 
-        # 筛选模式置于热力图上方，先选择查看路径再浏览九宫格。
+        # 筛选模式置于内容上方；状态切换模式不渲染九宫格，避免重复信息干扰。
         filter_mode = st.radio(
             "筛选维度",
             ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
@@ -562,17 +562,19 @@ def render():
             key="rotation_merge_filter",
         )
 
-        _render_heatmap_clickable(state_df)
-        selected_state = st.session_state.get("rotation_hm_state")
-
-        if selected_state:
-            n = int((state_df["state"] == selected_state).sum())
-            st.info(f"已按「{selected_state}」筛选 · 共 {n} 个板块")
-            if st.button("清除状态筛选", key="rotation_hm_clear"):
-                st.session_state["rotation_hm_state"] = None
-                st.rerun()
-
         if filter_mode.startswith("🎯"):
+            st.markdown("#### 九宫格板块分布热力图")
+            st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向　·　点击方块按状态筛选板块")
+            _render_heatmap_clickable(state_df)
+            selected_state = st.session_state.get("rotation_hm_state")
+
+            if selected_state:
+                n = int((state_df["state"] == selected_state).sum())
+                st.info(f"已按「{selected_state}」筛选 · 共 {n} 个板块")
+                if st.button("清除状态筛选", key="rotation_hm_clear"):
+                    st.session_state["rotation_hm_state"] = None
+                    st.rerun()
+
             matching_df = (
                 state_df[state_df["state"] == selected_state].copy()
                 if selected_state else state_df.copy()
