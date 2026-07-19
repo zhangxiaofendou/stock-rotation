@@ -1448,44 +1448,43 @@ _LOADED_COMPONENT_STOCKS = {}
 _LOADED_SPOT = None
 
 
-def render():
-    """个股下钻 — 三级联动：九宫格状态/切换 → 行业 → 个股详情"""
-    st.subheader("🔍 个股下钻")
-    st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 成分股详情")
+def render(selected_sector_code=None, sector_label="", embedded=False):
+    """渲染个股下钻。
 
-    # ================================================================
-    # 第 1 级：选择筛选维度
-    # ================================================================
-    filter_mode = st.radio(
-        "筛选维度",
-        ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
-        horizontal=True,
-    )
+    默认模式提供完整三级筛选；嵌入模式复用上游已选行业，直接展示该行业成分股。
+    """
+    if not embedded:
+        st.subheader("🔍 个股下钻")
+        st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 成分股详情")
 
-    all_states = load_all_sector_states()
-    
-    if all_states is None or all_states.empty:
-        st.error("无法加载板块状态数据，请先运行数据更新")
-        return
+        # ================================================================
+        # 第 1、2 级：选择筛选维度 → 选行业
+        # ================================================================
+        filter_mode = st.radio(
+            "筛选维度",
+            ["🎯 按九宫格状态筛选", "🔄 按状态切换筛选"],
+            horizontal=True,
+            key="stock_drill_filter_mode",
+        )
+        all_states = load_all_sector_states()
+        if all_states is None or all_states.empty:
+            st.error("无法加载板块状态数据，请先运行数据更新")
+            return
 
-    # ================================================================
-    # 第 2 级：按状态/切换筛选 → 选行业
-    # ================================================================
-    matching_df = None
-    selected_sector_code = None
-    sector_label = ""
+        if filter_mode.startswith("🎯"):
+            _, matching_df = _render_state_picker(all_states)
+        else:
+            _, matching_df = _render_transition_picker(all_states)
 
-    if filter_mode.startswith("🎯"):
-        _, matching_df = _render_state_picker(all_states)
-    else:
-        _, matching_df = _render_transition_picker(all_states)
+        if matching_df is not None and not matching_df.empty:
+            st.markdown("---")
+            selected_sector_code, sector_label = _render_sector_picker(matching_df)
 
-    if matching_df is not None and not matching_df.empty:
-        st.markdown("---")
-        selected_sector_code, sector_label = _render_sector_picker(matching_df)
-
-    if not selected_sector_code:
-        st.info("💡 请先在上方选择九宫格状态，然后选择一个行业板块，即可查看成分股详情。")
+        if not selected_sector_code:
+            st.info("💡 请先在上方选择九宫格状态，然后选择一个行业板块，即可查看成分股详情。")
+            return
+    elif not selected_sector_code:
+        st.info("💡 请先选择一个行业板块，即可查看个股下钻。")
         return
 
     # ================================================================

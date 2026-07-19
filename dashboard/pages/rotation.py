@@ -527,7 +527,7 @@ def _get_suggestion(state: str, prev_state: str) -> str:
 def render():
     """渲染板块轮动监控页面"""
     st.title("板块轮动监控")
-    st.markdown("九宫格热力图、板块详情、趋势验证、个股下钻")
+    st.markdown("九宫格热力图、板块详情、个股下钻、趋势验证")
 
     with st.spinner("加载轮动数据..."):
         state_df = load_state_df()
@@ -541,7 +541,7 @@ def render():
     # ================================================================
     # 受控 Tab 切换（刷新保留、关页重置）
     # ================================================================
-    ROTATION_TABS = ["九宫格热力图", "趋势验证", "个股下钻"]
+    ROTATION_TABS = ["九宫格热力图", "趋势验证"]
     active_tab = persistent_tabs("rotation_tab", ROTATION_TABS)
 
 
@@ -587,14 +587,23 @@ def render():
             return
 
         st.markdown("---")
-        selected_code, _ = render_sector_picker(
-            matching_df, label="选择行业查看详情", key="merge_sector_picker"
+        selected_code, selected_label = render_sector_picker(
+            matching_df, label="选择行业查看板块与个股详情", key="merge_sector_picker"
         )
 
         if not selected_code:
             return
 
         _render_sector_detail(state_df, score_df, selected_code)
+
+        st.markdown("---")
+        st.subheader("🔍 个股下钻")
+        st.caption("已关联当前筛选行业，可直接查看成分股排名、龙头识别、双重漏斗与个股详情。")
+        render_stock_drill(
+            selected_sector_code=selected_code,
+            sector_label=selected_label,
+            embedded=True,
+        )
 
         # ================================================================
         # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
@@ -1073,8 +1082,6 @@ def render():
         _render_heatmap_tab(state_df, score_df)
     elif active_tab == "趋势验证":
         _render_trend_tab(state_df, score_df)
-    elif active_tab == "个股下钻":
-        render_stock_drill()
 
 
 if __name__ == "__main__":
