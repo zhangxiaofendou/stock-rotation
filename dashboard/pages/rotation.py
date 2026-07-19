@@ -656,8 +656,8 @@ def render():
                 except Exception:
                     pass
 
-            # 状态卡片
-            col1, col2, col3, col4 = st.columns(4)
+            # 当前状态仅展示状态判断信息；评分与 RS 分值统一在下方评分明细呈现。
+            col1, col2, col3 = st.columns([2, 1, 2])
             with col1:
                 color = STATE_COLORS.get(info["state"], "#9E9E9E")
                 st.markdown(
@@ -665,15 +665,8 @@ def render():
                     unsafe_allow_html=True,
                 )
             with col2:
-                if _detail_score_row is not None and pd.notna(_detail_score_row.get("score")):
-                    st.metric("综合评分", f"{_detail_score_row['score']:.1f}")
-                else:
-                    st.metric("综合评分", "N/A")
                 st.metric("价格趋势", info["trend"])
             with col3:
-                st.metric("RS分位", f"{info['rs_percentile']:.1f}%" if info.get("rs_percentile") is not None else "N/A")
-                st.metric("RS动量", f"{info['rs_momentum_percentile']:.1f}%" if info.get("rs_momentum_percentile") is not None else "N/A")
-            with col4:
                 st.metric("前一日状态", prev_state)
                 if suggestion:
                     st.info(suggestion)
