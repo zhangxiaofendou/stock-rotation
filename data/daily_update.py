@@ -191,25 +191,23 @@ def update_all_sectors(source: AkShareSource, parquet: ParquetStore,
     return updated, skipped, errors
 
 
-def main():
-    """主流程"""
-    import argparse
-    parser = argparse.ArgumentParser(description="每日增量数据更新")
-    parser.add_argument("--dry-run", action="store_true", help="预览模式，只检查不写入")
-    args = parser.parse_args()
+def run_update(dry_run: bool = False) -> tuple:
+    """执行完整的数据更新流程（可被 Streamlit 看板调用）。
 
+    返回:
+        (updated: int, skipped: int, errors: int, report: str)
+    """
     source = AkShareSource()
     parquet = ParquetStore()
     freshness = DataFreshness()
 
     # 1. 拉取最新数据
     updated, skipped, errors = update_all_sectors(
-        source, parquet, freshness, dry_run=args.dry_run
+        source, parquet, freshness, dry_run=dry_run
     )
 
-    if args.dry_run:
-        logger.info("预览模式，未写入任何数据")
-        return
+    if dry_run:
+        return updated, skipped, errors, "预览模式，未写入任何数据"
 
     if updated == 0:
         logger.info("没有板块需要更新，跳过快照清除")
@@ -220,6 +218,17 @@ def main():
     # 3. 生成数据新鲜度报告
     report = freshness.generate_report()
     logger.info("\n" + report)
+    return updated, skipped, errors, report
+
+
+def main():
+    """主流程（CLI 入口）"""
+    import argparse
+    parser = argparse.ArgumentParser(description="每日增量数据更新")
+    parser.add_argument("--dry-run", action="store_true", help="预览模式，只检查不写入")
+    args = parser.parse_args()
+
+    run_update(dry_run=args.dry_run)
 
 
 if __name__ == "__main__":

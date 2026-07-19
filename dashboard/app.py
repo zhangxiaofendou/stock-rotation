@@ -11,68 +11,87 @@ import os
 # 确保项目根目录在 Python path 中
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pandas as pd
+
 from data.storage.sqlite_store import SQLiteStore
-from data.freshness import DataFreshness
+from config.logger import get_logger
+
+logger = get_logger(__name__)
 
 
-def check_data_freshness():
-    """检查数据新鲜度并返回状态信息"""
-    store = SQLiteStore()
-    freshness = DataFreshness(store)
+# ============================================================
+# 数据状态与刷新
+# ============================================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_latest_akshare_date() -> str:
+    """查询 AkShare 最新交易日（取一个代表板块的最新日期）。
 
-    fresh_report = store.get_freshness_report()
-    if fresh_report.empty:
-        return None, None, "unknown", "暂无新鲜度数据"
-
-    # 找最新的数据截止日期（优先使用 sector_hist 的数据）
-    latest_date = None
-    latest_update = None
-    has_stale = False
-
-    for _, row in fresh_report.iterrows():
-        end_date = row.get("data_end_date")
-        last_update = row.get("last_update")
-        status = row.get("status", "ok")
-
-        if status == "stale" or status == "error":
-            has_stale = True
-
-        if end_date is not None:
-            end_str = str(end_date)
-            if end_str and end_str != "nan" and end_str != "None":
-                if latest_date is None or end_str > latest_date:
-                    latest_date = end_str
-
-        if last_update is not None:
-            lu_str = str(last_update)
-            if lu_str and lu_str != "nan" and lu_str != "None":
-                if latest_update is None or lu_str > latest_update:
-                    latest_update = lu_str
-
-    # 从 RS 指标数据中获取实际最新日期（比 freshness 表更准确）
+    返回空字符串表示查询失败，避免阻塞看板渲染。
+    """
     try:
-        import os
-        from config.settings import PARQUET_DIR
-        rs_dir = os.path.join(str(PARQUET_DIR), "indicators", "rs")
-        if os.path.exists(rs_dir):
-            for f in os.listdir(rs_dir):
-                if f.endswith(".parquet"):
-                    import pandas as pd
-                    df = pd.read_parquet(os.path.join(rs_dir, f))
-                    if "date" in df.columns and len(df) > 0:
-                        last = str(df["date"].iloc[-1])[:10]
-                        if latest_date is None or last > latest_date:
-                            latest_date = last
-                    break  # 只检查第一个文件
-    except Exception:
-        pass
+        from data.sources.akshare_source import AkShareSource
+        source = AkShareSource()
+        df = source.get_sw_index_hist(symbol="801010", period="day")
+        if df is not None and not df.empty:
+            for col in ["date", "日期"]:
+                if col in df.columns:
+                    latest = df[col].dropna().max()
+                    return str(latest)[:10]
+    except Exception as e:
+        logger.warning(f"查询 AkShare 最新日期失败: {e}")
+    return ""
 
-    if has_stale:
-        return latest_date, latest_update, "stale", "部分数据已过期，请更新数据"
-    elif latest_date:
-        return latest_date, latest_update, "ok", "数据正常"
-    else:
-        return None, None, "unknown", "无法确定数据状态"
+
+def get_local_data_status():
+    """获取本地各数据类型的最新状态。
+
+    返回:
+        (latest_date: str, summary_df: pd.DataFrame)
+    """
+    store = SQLiteStore()
+    fresh_df = store.get_freshness_report()
+
+    latest_date = ""
+    rows = []
+    if fresh_df is not None and not fresh_df.empty:
+        for dtype in fresh_df["data_type"].unique():
+            sub = fresh_df[fresh_df["data_type"] == dtype]
+
+            end_dates = sub["data_end_date"].dropna().astype(str).tolist()
+            valid_ends = [
+                d for d in end_dates
+                if d and d.lower() not in ("nan", "none") and len(str(d)) == 10
+            ]
+            latest_end = max(valid_ends) if valid_ends else "—"
+
+            last_update = sub["last_update"].dropna().max()
+            total_records = sub["record_count"].sum()
+            has_error = (sub["status"] == "error").any()
+
+            if latest_end != "—" and (not latest_date or latest_end > latest_date):
+                latest_date = latest_end
+
+            rows.append({
+                "数据类型": dtype,
+                "最新数据日期": latest_end,
+                "最后更新时间": str(last_update)[:19] if pd.notna(last_update) else "—",
+                "记录数": int(total_records) if pd.notna(total_records) else "—",
+                "状态": "异常" if has_error else "正常",
+            })
+
+    return latest_date, pd.DataFrame(rows)
+
+
+def run_manual_data_update():
+    """执行手动数据刷新，返回 (success, message)"""
+    try:
+        from data.daily_update import run_update
+        with st.spinner("正在从 AkShare 拉取并更新数据，请稍候..."):
+            updated, skipped, errors, report = run_update(dry_run=False)
+        return True, f"更新完成：更新 {updated} 个板块，跳过 {skipped} 个，错误 {errors} 个。"
+    except Exception as e:
+        logger.exception("手动刷新数据失败")
+        return False, f"刷新失败：{e}"
 
 
 def main():
@@ -92,21 +111,45 @@ def main():
         st.title("📊 板块轮动分析")
         st.markdown("---")
 
-        # 数据新鲜度
-        latest_date, latest_update, fresh_status, fresh_msg = check_data_freshness()
+        # 数据状态与手动刷新
+        st.markdown("### 📡 数据状态")
 
-        if fresh_status == "stale":
-            st.error(f"⚠️ {fresh_msg}")
-            if latest_date:
-                st.caption(f"最新数据日期: {latest_date}")
-            if latest_update:
-                st.caption(f"最后更新: {latest_update[:19]}")
-        elif latest_date:
-            st.success(f"数据更新至 {latest_date}")
-            if latest_update:
-                st.caption(f"最后更新: {latest_update[:19]}")
+        akshare_date = get_latest_akshare_date()
+        local_date, summary_df = get_local_data_status()
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.caption("AkShare 最新交易日")
+            st.markdown(f"**{akshare_date or '—'}**")
+        with col2:
+            st.caption("本地最新数据日期")
+            st.markdown(f"**{local_date or '—'}**")
+
+        # 手动刷新按钮
+        if st.button("🔄 手动刷新全部数据", key="manual_refresh_data"):
+            success, msg = run_manual_data_update()
+            if success:
+                st.success(msg)
+                st.rerun()
+            else:
+                st.error(msg)
+
+        # 各数据类型最新日期明细
+        if summary_df is not None and not summary_df.empty:
+            st.markdown("##### 各数据类型最新日期")
+            st.dataframe(
+                summary_df,
+                hide_index=True,
+                column_config={
+                    "数据类型": st.column_config.TextColumn("数据类型"),
+                    "最新数据日期": st.column_config.TextColumn("最新数据日期"),
+                    "最后更新时间": st.column_config.TextColumn("最后更新时间"),
+                    "记录数": st.column_config.NumberColumn("记录数"),
+                    "状态": st.column_config.TextColumn("状态"),
+                },
+            )
         else:
-            st.warning("数据状态未知")
+            st.info("暂无数据新鲜度记录")
 
         st.markdown("---")
 
