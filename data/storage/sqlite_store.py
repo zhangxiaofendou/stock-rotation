@@ -95,12 +95,36 @@ CREATE TABLE IF NOT EXISTS stocks (
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
+-- 信号事件账本：每条记录代表一个板块在某交易日发生的状态转换。
+-- 作为信号绩效、历史回放、盘后报告的共享事实源；不记录状态不变的日子。
+CREATE TABLE IF NOT EXISTS signal_events (
+    event_date TEXT NOT NULL,           -- 当前状态生效交易日，YYYY-MM-DD
+    sector_code TEXT NOT NULL,
+    sector_name TEXT NOT NULL,
+    from_state TEXT NOT NULL,
+    to_state TEXT NOT NULL,
+    from_signal TEXT NOT NULL,
+    to_signal TEXT NOT NULL,
+    action TEXT NOT NULL,               -- 72条路径对应的通用动作
+    action_logic TEXT,
+    trend TEXT,
+    rs_percentile REAL,
+    rs_momentum_percentile REAL,
+    rs_momentum_cross_pct REAL,
+    source_version TEXT NOT NULL,       -- 状态机口径版本，便于后续审计
+    synced_at TEXT DEFAULT (datetime('now', 'localtime')),
+    PRIMARY KEY (event_date, sector_code),
+    FOREIGN KEY (sector_code) REFERENCES sectors(code)
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_sector_stocks_sector ON sector_stocks(sector_code);
 CREATE INDEX IF NOT EXISTS idx_sector_stocks_stock ON sector_stocks(stock_code);
 CREATE INDEX IF NOT EXISTS idx_freshness_type ON data_freshness(data_type);
 CREATE INDEX IF NOT EXISTS idx_trade_calendar_date ON trade_calendar(trade_date);
 CREATE INDEX IF NOT EXISTS idx_sector_groups_group ON sector_groups(group_name);
+CREATE INDEX IF NOT EXISTS idx_signal_events_sector_date ON signal_events(sector_code, event_date DESC);
+CREATE INDEX IF NOT EXISTS idx_signal_events_path_date ON signal_events(from_state, to_state, event_date DESC);
 """
 
 
@@ -383,6 +407,81 @@ class SQLiteStore:
                 ORDER BY data_type, data_key
             """, conn, params=(f'-{stale_hours} hours',))
             return df
+        finally:
+            conn.close()
+
+    # ============================================================
+    # 信号事件账本
+    # ============================================================
+    def upsert_signal_events(self, events: List[Tuple]) -> int:
+        """幂等写入状态切换事件，唯一键为（当前交易日、板块代码）。
+
+        每条 tuple 顺序为：event_date, sector_code, sector_name, from_state,
+        to_state, from_signal, to_signal, action, action_logic, trend,
+        rs_percentile, rs_momentum_percentile, rs_momentum_cross_pct,
+        source_version。重复同步会更新同一事实记录，不新增重复事件。
+        """
+        if not events:
+            return 0
+        conn = self._get_conn()
+        try:
+            conn.executemany("""
+                INSERT INTO signal_events (
+                    event_date, sector_code, sector_name, from_state, to_state,
+                    from_signal, to_signal, action, action_logic, trend,
+                    rs_percentile, rs_momentum_percentile, rs_momentum_cross_pct,
+                    source_version, synced_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                ON CONFLICT(event_date, sector_code) DO UPDATE SET
+                    sector_name=excluded.sector_name,
+                    from_state=excluded.from_state,
+                    to_state=excluded.to_state,
+                    from_signal=excluded.from_signal,
+                    to_signal=excluded.to_signal,
+                    action=excluded.action,
+                    action_logic=excluded.action_logic,
+                    trend=excluded.trend,
+                    rs_percentile=excluded.rs_percentile,
+                    rs_momentum_percentile=excluded.rs_momentum_percentile,
+                    rs_momentum_cross_pct=excluded.rs_momentum_cross_pct,
+                    source_version=excluded.source_version,
+                    synced_at=datetime('now', 'localtime')
+            """, events)
+            conn.commit()
+            return len(events)
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"写入信号事件失败: {e}")
+            raise
+        finally:
+            conn.close()
+
+    def get_signal_events(
+        self,
+        start: str = None,
+        end: str = None,
+        sector_code: str = None,
+        limit: int = None,
+    ) -> pd.DataFrame:
+        """查询信号事件账本，按事件日期倒序返回。"""
+        clauses, params = [], []
+        if start:
+            clauses.append("event_date >= ?")
+            params.append(start)
+        if end:
+            clauses.append("event_date <= ?")
+            params.append(end)
+        if sector_code:
+            clauses.append("sector_code = ?")
+            params.append(sector_code)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        sql = "SELECT * FROM signal_events" + where + " ORDER BY event_date DESC, sector_code"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        conn = self._get_conn()
+        try:
+            return pd.read_sql_query(sql, conn, params=params)
         finally:
             conn.close()
 

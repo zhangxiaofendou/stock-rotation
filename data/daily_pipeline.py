@@ -43,6 +43,8 @@ from data.storage.sqlite_store import SQLiteStore  # noqa: E402
 from data.freshness import DataFreshness  # noqa: E402
 from data.daily_update import update_benchmarks as refresh_benchmarks  # noqa: E402
 from indicators.price_trend import PriceTrend  # noqa: E402
+from model.state_machine import StateMachine  # noqa: E402
+from model.signal_ledger import SignalEventLedger  # noqa: E402
 
 logger = get_logger(__name__)
 
@@ -151,6 +153,21 @@ def recompute_trends():
     logger.info(f"趋势重算完成: 成功 {ok}, 失败 {err}")
 
 
+def sync_signal_events():
+    """将重算后的状态序列同步到共享信号事件账本。"""
+    parquet = ParquetStore()
+    sqlite = SQLiteStore()
+    ledger = SignalEventLedger(sqlite, StateMachine(parquet, sqlite))
+    summary = ledger.sync()
+    logger.info(
+        "信号事件同步完成：板块 %s，事件 %s，失败 %s",
+        summary["processed_sectors"],
+        summary["written_events"],
+        len(summary["failed_sectors"]),
+    )
+    return summary
+
+
 def run_module(mod: str) -> int:
     """以子进程运行一个 python -m 模块，捕获日志。返回 returncode。"""
     logger.info(f"▶ 执行 python -m {mod}")
@@ -196,6 +213,8 @@ def main():
     # 直接跳过。这能正确覆盖「周末/节假日的正常无更新」场景（数据已是最近交易日收盘）。
     if data_is_current(target):
         logger.info(f"数据已为最新交易日 {target} 收盘，无需更新（幂等跳过）。")
+        # 即便行情和指标已是最新，也同步账本：首次上线、状态规则升级后可补齐历史事件。
+        sync_signal_events()
         return
 
     # 非交易日但数据滞后：仍补跑到最新交易日收盘（如周六补周五数据），
@@ -214,6 +233,8 @@ def main():
     run_module("indicators.calc_all")
     # 4. 绝对价格趋势落盘（state_machine / scoring 读取）
     recompute_trends()
+    # 5. 状态已经按最新指标重算，固化发生变化的状态事件供绩效/回放/报告复用。
+    sync_signal_events()
     logger.info(f"========== 每日全量更新管线完成 {today}（已更新至 {target} 收盘）==========")
 
 
