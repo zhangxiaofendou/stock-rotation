@@ -265,11 +265,12 @@ def render_transition_picker(all_states_df, key="transition_picker"):
 
     buy_targets = {"⑨底背离", "⑥弱转强"}
     sell_targets = {"①领涨减速", "④强转弱", "⑦持续杀跌"}
-    signal_colors = {
-        StateMachine.SIGNAL_SELL: "#e23c3c",
-        StateMachine.SIGNAL_BUY:  "#16a34a",
-        StateMachine.SIGNAL_HOLD: "#f59e0b",
-        StateMachine.SIGNAL_WATCH: "#9e9e9e",
+
+    action_emoji = {
+        StateMachine.SIGNAL_SELL: "🔴",
+        StateMachine.SIGNAL_BUY:  "🟢",
+        StateMachine.SIGNAL_HOLD: "🟡",
+        StateMachine.SIGNAL_WATCH: "⚪",
     }
 
     def _extract_to_state(state_change: str) -> str:
@@ -314,8 +315,7 @@ def render_transition_picker(all_states_df, key="transition_picker"):
                 count = int(row["count"])
                 sectors = row["sectors"]
                 action = row["action"]
-                action_color = signal_colors.get(action, "#9e9e9e")
-                action_badge = f"<span style='color:{action_color}; font-weight:700;'>{action}</span>"
+                action_badge = f"{action_emoji.get(action, '')} {action}"
 
                 with st.expander(f"{state_chg} · {action_badge} · {count} 个板块", expanded=False):
                     # 使用紧凑的列布局减少空白
