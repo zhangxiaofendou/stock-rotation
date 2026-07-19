@@ -1,7 +1,7 @@
 """
 板块轮动监控页面（核心页面）
 ===========================
-展示九宫格热力图、板块强弱排行、重点关注区、板块卡片。
+展示九宫格热力图、板块强弱排行、板块卡片。
 """
 
 import streamlit as st
@@ -612,31 +612,6 @@ def render():
             state_counts[s] = int(state_df["state"].value_counts()[s])
         fig_bar = _make_state_bar(state_counts)
         st.plotly_chart(fig_bar, width="stretch")
-
-        # 重点关注区
-        st.subheader("重点关注")
-        focus_states = ["⑥弱转强", "⑨底背离", "③加速冲顶"]
-        focus_df = state_df[state_df["state"].isin(focus_states)]
-
-        if not focus_df.empty:
-            # 按状态分组显示
-            for focus_state in focus_states:
-                subset = focus_df[focus_df["state"] == focus_state]
-                if subset.empty:
-                    continue
-                color = STATE_COLORS.get(focus_state, "#9E9E9E")
-                emoji = STATE_EMOJI.get(focus_state, "")
-
-                with st.expander(f"{emoji} {focus_state} ({len(subset)}个板块)", expanded=(focus_state in ["⑥弱转强", "⑨底背离"])):
-                    for _, row in subset.iterrows():
-                        c1, c2, c3 = st.columns([3, 1, 1])
-                        with c1:
-                            st.markdown(f"**{row['sector_name']}**")
-                            st.caption(row["sector_code"])
-                        with c2:
-                            st.markdown(f"RS分位: {row['rs_percentile']:.1f}%" if row["rs_percentile"] is not None else "RS分位: N/A")
-                        with c3:
-                            st.markdown(f"RS动量: {row['rs_momentum_percentile']:.1f}%")
 
         # ================================================================
         # Tab 2: 板块详情（原独立页面迁入，替换板块卡片）
