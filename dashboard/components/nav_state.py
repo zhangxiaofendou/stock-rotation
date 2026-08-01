@@ -48,6 +48,11 @@ def persistent_tabs(key: str, tabs: list):
         st.session_state[key] = choice
         st.query_params[key] = choice
 
+    # 5) 防御：部分 Streamlit 版本在首渲时 segmented_control 可能返回 None，
+    #    此时回退到已确定的会话默认值，避免调用方 if/elif 全不命中导致内容空白。
+    if choice is None:
+        choice = st.session_state.get(key) or tabs[0]
+
     return choice
 
 
