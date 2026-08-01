@@ -146,59 +146,68 @@ class MoneyFlowIndicator:
         """
         logger.info(f"计算资金流趋势: {sector_code}, 天数={days}")
 
-        # 获取行业名称
+        # 获取行业名称（备用）
         sector_name = self._get_sector_name_from_code(sector_code)
-        if sector_name is None:
-            logger.warning(f"无法获取板块 {sector_code} 的名称")
-            return None
 
         # 获取当前资金流排名
         current_df = self.calc_sector_fund_flow_rank(indicator="今日")
         if current_df is None or current_df.empty:
             return None
 
-        # 尝试匹配行业名称（资金流数据可能使用不同的名称格式）
-        # 查找可能的列名
-        name_col = None
-        for col in ["名称", "行业", "板块", "name", "sector"]:
+        # 优先按代码列匹配（同花顺体系下代码一致最可靠）
+        code_col = None
+        for col in ["代码", "code", "sector_code", "板块代码"]:
             if col in current_df.columns:
-                name_col = col
+                code_col = col
                 break
-        if name_col is None:
-            name_col = current_df.columns[0]
 
         # 查找流入列
         flow_col = None
-        for col in ["主力净流入-净额", "主力净流入", "net_inflow", "flow"]:
+        for col in ["主力净流入-净额", "主力净流入", "净流入-净额", "net_inflow", "flow"]:
             if col in current_df.columns:
                 flow_col = col
                 break
         if flow_col is None and len(current_df.columns) >= 2:
             flow_col = current_df.columns[1]
 
-        # 匹配板块
-        matched = current_df[current_df[name_col].str.contains(
-            sector_name.replace("Ⅱ", "").replace(" ", ""), na=False
-        )]
+        def _norm_code(s):
+            s = str(s).replace(".", "").replace("_", "").upper()
+            # 兼容 BK881121 / 881121 / sh881121
+            return s.lstrip("BK").lstrip("SH").lstrip("SZ").lstrip("BJ")
 
-        if matched.empty:
-            # 尝试更宽松的匹配
-            logger.debug(f"资金流数据中未精确匹配到 {sector_name}，尝试模糊匹配")
-            matched = current_df[current_df[name_col].apply(
-                lambda x: sector_name[:2] in str(x) if pd.notna(x) else False
-            )]
-
-        if matched.empty:
-            logger.warning(f"资金流数据中未找到板块 {sector_code} ({sector_name})")
-            return None
-
-        # 计算当前排名（按净流入从大到小排）
+        # 先计算排名（按净流入从大到小排），再匹配，确保 matched 能拿到 _rank
         if flow_col:
             current_df = current_df.copy()
             current_df["_rank"] = current_df[flow_col].rank(ascending=False)
-            current_rank = int(matched["_rank"].values[0]) if "_rank" in matched.columns else None
-        else:
-            current_rank = None
+
+        matched = None
+        name_col = None
+        if code_col is not None:
+            norm = _norm_code(sector_code)
+            matched = current_df[current_df[code_col].apply(_norm_code) == norm]
+
+        # 代码列未命中或不存在时，按名称兜底匹配
+        if (matched is None or matched.empty) and sector_name:
+            for col in ["名称", "行业", "板块", "name", "sector"]:
+                if col in current_df.columns:
+                    name_col = col
+                    break
+            if name_col is None:
+                name_col = current_df.columns[0]
+            matched = current_df[current_df[name_col].str.contains(
+                sector_name.replace("Ⅱ", "").replace(" ", ""), na=False
+            )]
+            if matched.empty:
+                logger.debug(f"资金流数据中未精确匹配到 {sector_name}，尝试模糊匹配")
+                matched = current_df[current_df[name_col].apply(
+                    lambda x: sector_name[:2] in str(x) if pd.notna(x) else False
+                )]
+
+        if matched is None or matched.empty:
+            logger.warning(f"资金流数据中未找到板块 {sector_code} ({sector_name})")
+            return None
+
+        current_rank = int(matched["_rank"].values[0]) if "_rank" in matched.columns else None
 
         # 获取历史资金流数据以计算排名变化
         rank_change = None
@@ -211,9 +220,15 @@ class MoneyFlowIndicator:
                     if flow_col and flow_col in prev_df.columns:
                         prev_df = prev_df.copy()
                         prev_df["_rank"] = prev_df[flow_col].rank(ascending=False)
-                        prev_matched = prev_df[prev_df[name_col].str.contains(
-                            sector_name.replace("Ⅱ", "").replace(" ", ""), na=False
-                        )]
+                        # 历史同样优先按代码匹配
+                        prev_matched = None
+                        if code_col is not None and code_col in prev_df.columns:
+                            norm = _norm_code(sector_code)
+                            prev_matched = prev_df[prev_df[code_col].apply(_norm_code) == norm]
+                        if (prev_matched is None or prev_matched.empty) and sector_name and name_col in prev_df.columns:
+                            prev_matched = prev_df[prev_df[name_col].str.contains(
+                                sector_name.replace("Ⅱ", "").replace(" ", ""), na=False
+                            )]
                         if not prev_matched.empty and current_rank is not None:
                             prev_rank = int(prev_matched["_rank"].values[0])
                             rank_change = prev_rank - current_rank  # 正=改善（排名上升）

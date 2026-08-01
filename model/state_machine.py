@@ -519,10 +519,10 @@ class StateMachine:
         sector_codes = []
         for f in os.listdir(rs_dir):
             if f.endswith(".parquet"):
-                code = f.replace(".parquet", "").replace("_", ".", 1)
-                # 确保格式是 XXXXXX.SI
-                if not code.endswith(".SI"):
-                    code = code.replace("_SI", ".SI")
+                # 文件名保存时把 code 中的 '.' 替换为 '_'，因此还原即可。
+                # 申万 801010.SI -> 801010_SI.parquet -> 801010.SI
+                # 同花顺 881121   -> 881121.parquet   -> 881121
+                code = f.replace(".parquet", "").replace("_", ".")
                 sector_codes.append(code)
 
         if not sector_codes:

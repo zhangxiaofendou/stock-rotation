@@ -362,6 +362,17 @@ class SQLiteStore:
     # ============================================================
     # 基准映射 CRUD
     # ============================================================
+    def clear_benchmark_map(self):
+        """清空 benchmark_map 表（切源后重建用）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM benchmark_map")
+            conn.commit()
+        except Exception as e:
+            logger.error(f"清空 benchmark_map 失败: {e}")
+        finally:
+            conn.close()
+
     def insert_benchmark_map_batch(self, mappings: List[Tuple]):
         """批量插入基准映射"""
         conn = self._get_conn()
@@ -388,6 +399,17 @@ class SQLiteStore:
     # ============================================================
     # 板块分组 CRUD
     # ============================================================
+    def clear_sector_groups(self):
+        """清空 sector_groups 表（切源后重建用）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM sector_groups")
+            conn.commit()
+        except Exception as e:
+            logger.error(f"清空 sector_groups 失败: {e}")
+        finally:
+            conn.close()
+
     def insert_sector_groups_batch(self, groups: List[Tuple]):
         """批量插入板块分组"""
         conn = self._get_conn()
@@ -564,6 +586,44 @@ class SQLiteStore:
                 "SELECT date FROM sector_divergence ORDER BY date DESC LIMIT 1"
             ).fetchone()
             return row[0] if row else None
+        finally:
+            conn.close()
+
+    def delete_sector_fund_flow_not_in(self, codes: List[str]) -> int:
+        """删除 sector_fund_flow 中不在 codes 列表里的记录，返回删除行数。"""
+        if not codes:
+            return 0
+        conn = self._get_conn()
+        try:
+            placeholders = ",".join("?" * len(codes))
+            cur = conn.execute(
+                f"DELETE FROM sector_fund_flow WHERE sector_code NOT IN ({placeholders})",
+                tuple(codes),
+            )
+            conn.commit()
+            return cur.rowcount
+        except Exception as e:
+            logger.error(f"清理旧 sector_fund_flow 记录失败: {e}")
+            return 0
+        finally:
+            conn.close()
+
+    def delete_sector_divergence_not_in(self, codes: List[str]) -> int:
+        """删除 sector_divergence 中不在 codes 列表里的记录，返回删除行数。"""
+        if not codes:
+            return 0
+        conn = self._get_conn()
+        try:
+            placeholders = ",".join("?" * len(codes))
+            cur = conn.execute(
+                f"DELETE FROM sector_divergence WHERE sector_code NOT IN ({placeholders})",
+                tuple(codes),
+            )
+            conn.commit()
+            return cur.rowcount
+        except Exception as e:
+            logger.error(f"清理旧 sector_divergence 记录失败: {e}")
+            return 0
         finally:
             conn.close()
 

@@ -68,6 +68,56 @@ def _is_cache_compatible(source, cached: dict) -> bool:
     return True
 
 
+def _sync_sector_meta_to_sqlite(em_map: dict):
+    """把当前板块宇宙同步到 SQLite 元数据表（sectors / benchmark_map / sector_groups）。
+
+    切源后旧代码会残留在这些表里，导致 indicators.calc_all 用错代码生成 parquet，
+    进而状态机无法匹配 SECTOR_GROUPS。因此每次宇宙刷新后都同步一次。
+    """
+    if not em_map:
+        return
+    try:
+        from config.sector_map import (
+            SW_LEVEL1_MAP, SW_LEVEL2_MAP, SECTOR_GROUPS,
+            SW_LEVEL1_BENCHMARK, SW_LEVEL2_BENCHMARK,
+        )
+        from config.settings import BENCHMARK_INDEXES
+        from data.storage.sqlite_store import SQLiteStore
+
+        store = SQLiteStore()
+        # 1) sectors 表（幂等）
+        rows = []
+        for code, name in SW_LEVEL1_MAP.items():
+            rows.append((code, name, 1, None, None, None))
+        for code, (name, parent_code, parent_name) in SW_LEVEL2_MAP.items():
+            rows.append((code, name, 2, parent_code, parent_name, None))
+        store.insert_sectors_batch(rows)
+
+        # 2) benchmark_map 表（先清空旧记录，避免 801xxx.SI 残留）
+        store.clear_benchmark_map()
+        mappings = []
+        for code, benchmark_code in SW_LEVEL1_BENCHMARK.items():
+            mappings.append((code, benchmark_code, BENCHMARK_INDEXES.get(benchmark_code, benchmark_code)))
+        for code, benchmark_code in SW_LEVEL2_BENCHMARK.items():
+            mappings.append((code, benchmark_code, BENCHMARK_INDEXES.get(benchmark_code, benchmark_code)))
+        store.insert_benchmark_map_batch(mappings)
+
+        # 3) sector_groups 表（先清空旧记录）
+        store.clear_sector_groups()
+        groups = []
+        for group_name, group_info in SECTOR_GROUPS.items():
+            for code in group_info["level2_codes"]:
+                groups.append((group_name, code, group_info["description"]))
+        store.insert_sector_groups_batch(groups)
+
+        logger.info(
+            "板块元数据已同步: sectors=%d, benchmark_map=%d, sector_groups=%d",
+            len(rows), len(mappings), len(groups)
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("同步板块元数据到 SQLite 失败: %s", e)
+
+
 def ensure_em_industry_map(source, force: bool = False) -> dict:
     """确保同花顺板块宇宙已就绪：拉取清单并填充 config.sector_map。
 
@@ -111,6 +161,20 @@ def ensure_em_industry_map(source, force: bool = False) -> dict:
         logger.info("板块宇宙就绪：%d 个行业板块", len(em_map))
 
     sector_map.refresh_em_universe(em_map)
+
+    # 切源后同步 SQLite 元数据，避免旧 801xxx.SI 记录污染下游指标计算
+    _sync_sector_meta_to_sqlite(em_map)
+
+    # 清理旧数据源留下的确认因子记录，避免资金流向/分化度页面显示过期代码
+    try:
+        from data.storage.sqlite_store import SQLiteStore
+        store = SQLiteStore()
+        n_ff = store.delete_sector_fund_flow_not_in(list(em_map.keys()))
+        n_dv = store.delete_sector_divergence_not_in(list(em_map.keys()))
+        if n_ff or n_dv:
+            logger.info("清理旧确认因子记录: sector_fund_flow=%d, sector_divergence=%d", n_ff, n_dv)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("清理旧确认因子记录失败: %s", e)
 
     # 清理旧数据源留下的 sector_hist 新鲜度记录，避免 dashboard 汇总仍显示 7.30
     try:

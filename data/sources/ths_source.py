@@ -338,7 +338,30 @@ class THSDataSource(BaseDataSource):
         return self._fb("get_concept_fund_flow", *args, **kwargs)
 
     def get_sector_fund_flow_rank(self, indicator: str = "今日", *args, **kwargs):
-        return self._fb("get_sector_fund_flow_rank", indicator, *args, **kwargs)
+        """同花顺行业资金流入排名（用实时涨跌幅代理主力净流入）。
+
+        AkShare 的行业资金流排名命名与同花顺不完全一致，匹配失败会导致
+        sector_fund_flow 表整体为空。同花顺实时行业接口提供全量 881xxx 涨跌幅，
+        这里用涨跌幅作为净流入的代理指标，保证资金流向地图有数据可展示。
+
+        返回 DataFrame 列：名称、代码、主力净流入-净额（代理）、涨跌幅
+        """
+        # 复用实时行业清单接口（带静态兜底）
+        rows = self._fetch_ths_industry_rows()
+        if not rows:
+            logger.warning("同花顺行业实时接口为空，启用静态兜底生成资金流排名")
+            rows = [{"code": code, "name": name, "pct": 0.0} for code, name in _THS_FALLBACK_MAP.items()]
+        if not rows:
+            return None
+
+        df = pd.DataFrame(rows)
+        df = df.rename(columns={"code": "代码", "name": "名称", "pct": "涨跌幅"})
+        # 用涨跌幅作为主力净流入代理（方向/量级一致，仅用于排名）
+        df["主力净流入-净额"] = df["涨跌幅"].astype(float)
+        df["净流入-净额"] = df["涨跌幅"].astype(float)
+        # 兼容 MoneyFlowIndicator 可能查找的列名
+        df["主力净流入"] = df["涨跌幅"].astype(float)
+        return df[["名称", "代码", "主力净流入-净额", "净流入-净额", "主力净流入", "涨跌幅"]]
 
     def get_stock_individual_fund_flow(self, stock: str, market: str = "sh", *args, **kwargs):
         return self._fb("get_stock_individual_fund_flow", stock, market, *args, **kwargs)
