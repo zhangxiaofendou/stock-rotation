@@ -393,6 +393,16 @@ def main():
     run_error = None
     today = datetime.now().strftime("%Y-%m-%d")
 
+    # 0. 确保板块宇宙就绪（东财行业清单 → config.sector_map），并刷新 SQLite 元数据
+    try:
+        from data.sources import get_data_source
+        from data.sector_universe import ensure_em_industry_map
+        from data.storage.sqlite_store import SQLiteStore
+        ensure_em_industry_map(get_data_source())
+        SQLiteStore().ensure_sectors()
+    except Exception as e:
+        logger.warning("板块宇宙初始化失败(非致命): %s", e)
+
     # 0. 真实交易日历（含法定节假日）best-effort 保证已入库，供后续判断使用
     try:
         ensure_trade_calendar()

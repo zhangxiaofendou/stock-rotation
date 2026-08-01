@@ -31,7 +31,8 @@ from config.sector_map import (
     SW_LEVEL1_MAP, SW_LEVEL2_MAP, SECTOR_GROUPS,
     SW_LEVEL1_BENCHMARK, SW_LEVEL2_BENCHMARK,
 )
-from data.sources.akshare_source import AkShareSource
+from data.sources import get_data_source, BaseDataSource
+from data.sector_universe import ensure_em_industry_map
 from data.storage.sqlite_store import SQLiteStore
 from data.storage.parquet_store import ParquetStore
 from data.freshness import DataFreshness
@@ -40,7 +41,7 @@ from data.calendar import TradeCalendar
 logger = get_logger(__name__)
 
 
-def step1_init_sectors(source: AkShareSource, store: SQLiteStore):
+def step1_init_sectors(source: BaseDataSource, store: SQLiteStore):
     """
     步骤1：初始化申万行业分类
     - 从 AkShare 获取一级行业分类
@@ -96,7 +97,7 @@ def step1_init_sectors(source: AkShareSource, store: SQLiteStore):
     logger.info(f"已写入 {len(benchmark_data)} 条基准映射")
 
 
-def step2_init_calendar(source: AkShareSource, store: SQLiteStore):
+def step2_init_calendar(source: BaseDataSource, store: SQLiteStore):
     """
     步骤2：初始化交易日历
     """
@@ -116,7 +117,7 @@ def step2_init_calendar(source: AkShareSource, store: SQLiteStore):
         logger.error("交易日历初始化失败")
 
 
-def step3_fetch_index_hist(source: AkShareSource, parquet: ParquetStore,
+def step3_fetch_index_hist(source: BaseDataSource, parquet: ParquetStore,
                            freshness: DataFreshness):
     """
     步骤3：批量拉取申万二级板块指数历史数据
@@ -190,7 +191,7 @@ def step3_fetch_index_hist(source: AkShareSource, parquet: ParquetStore,
         logger.warning(f"失败的板块: {failed_codes}")
 
 
-def step4_fetch_benchmarks(source: AkShareSource, parquet: ParquetStore,
+def step4_fetch_benchmarks(source: BaseDataSource, parquet: ParquetStore,
                            freshness: DataFreshness):
     """
     步骤4：获取基准指数历史数据
@@ -265,12 +266,16 @@ def main():
     logger.info(f"回测起始日期: {BACKTEST_CONFIG['start_date']}")
 
     # 初始化各组件
-    source = AkShareSource()
+    source = get_data_source()
     store = SQLiteStore()
     parquet = ParquetStore()
     freshness = DataFreshness(store=store)
 
     try:
+        # 步骤0：确保板块宇宙就绪（东财行业清单 → config.sector_map）
+        ensure_em_industry_map(source)
+        store.ensure_sectors()
+
         # 步骤1：行业分类
         step1_init_sectors(source, store)
 

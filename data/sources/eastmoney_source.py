@@ -295,17 +295,61 @@ class EastMoneyLiveSource(BaseDataSource):
     # 申万指数历史（东方财富无直接 secid，委托 AkShare）
     # ============================================================
     def get_sw_index_hist(self, symbol: str, period: str = "day") -> Optional[pd.DataFrame]:
+        """板块指数历史。
+
+        东方财富行业板块（BKxxxx / 90.BKxxxx）走自有 K 线（到最新交易日收盘，
+        返回中文列：日期/开盘/收盘/最高/最低…，与下游指标层 schema 一致）。
+        申万代码（801xxx 等无东财 secid）回退 AkShare，保证遗留路径不丢。
         """
-        申万指数历史。东方财富 90.801xxx 被解析为概念板块，无直接申万 secid，
-        故惰性委托 AkShare（与现有管线行为一致）。
-        """
+        s = str(symbol).strip()
+        if s.upper().startswith("BK") or s.startswith("90."):
+            secid = s if s.startswith("90.") else f"90.{s}"
+            df = self._kline(secid)
+            if df is not None and not df.empty:
+                return df.rename(columns=_CN_COLS)
+            # 主源失败 → 回退 AkShare 东财行业历史
+            ak = self._lazy_ak()
+            if ak is not None:
+                return ak.get_em_industry_hist(s)
+            return None
+        # 其余（如遗留申万代码）委托 AkShare
         return self._fb("get_sw_index_hist", symbol, period)
 
     # ============================================================
     # 东方财富行业板块（自有 K 线，到最新交易日收盘）
     # ============================================================
-    def get_em_industry_list(self) -> Optional[pd.DataFrame]:
-        return self._fb("get_em_industry_list")
+    def get_em_industry_list(self) -> Optional[dict]:
+        """东方财富行业板块清单（{BKxxxx: 名称}）。主源 clist，失败回退 AkShare。"""
+        url = (
+            "https://push2.eastmoney.com/api/qt/clist/get"
+            "?pn=1&pz=600&fs=m:90+t:2&fields=f12,f13,f14&fid=f3&np=1"
+        )
+        try:
+            req = urllib.request.Request(url, headers=_HEADERS)
+            raw = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "ignore")
+            d = json.loads(raw)
+            items = d.get("data", {}).get("diff") or []
+            out = {}
+            for it in items:
+                code = it.get("f12")
+                name = it.get("f14")
+                if code and name:
+                    out[str(code)] = str(name)
+            if out:
+                return out
+            logger.debug("东财行业清单(clist)返回空")
+        except Exception as e:
+            logger.warning("东财行业清单(clist)失败: %s", e)
+        # 兜底 AkShare
+        ak = self._lazy_ak()
+        if ak is not None and hasattr(ak, "get_em_industry_list"):
+            try:
+                df = ak.get_em_industry_list()
+                if df is not None and not getattr(df, "empty", True):
+                    return {str(r["板块代码"]): str(r["板块名称"]) for _, r in df.iterrows()}
+            except Exception as e:
+                logger.warning("AkShare 行业清单兜底失败: %s", e)
+        return None
 
     def get_em_industry_hist(self, symbol: str, start: str = "20180101",
                              end: str = "20500101") -> Optional[pd.DataFrame]:

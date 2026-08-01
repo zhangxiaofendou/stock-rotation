@@ -24,22 +24,22 @@ logger = get_logger(__name__)
 # 数据状态与刷新
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
-def get_latest_akshare_date() -> str:
-    """查询 AkShare 最新交易日（取一个代表板块的最新日期）。
+def get_latest_source_date() -> str:
+    """查询数据源(东方财富)最新交易日（取沪深300基准的最新日期）。
 
     返回空字符串表示查询失败，避免阻塞看板渲染。
     """
     try:
         from data.sources import get_data_source
         source = get_data_source()
-        df = source.get_sw_index_hist(symbol="801010", period="day")
+        df = source.get_benchmark_hist(symbol="sh000300")
         if df is not None and not df.empty:
             for col in ["date", "日期"]:
                 if col in df.columns:
                     latest = df[col].dropna().max()
                     return str(latest)[:10]
     except Exception as e:
-        logger.warning(f"查询 AkShare 最新日期失败: {e}")
+        logger.warning(f"查询数据源最新日期失败: {e}")
     return ""
 
 
@@ -87,12 +87,26 @@ def run_manual_data_update():
     """执行手动数据刷新，返回 (success, message)"""
     try:
         from data.daily_update import run_update
-        with st.spinner("正在从 AkShare 拉取并更新数据，请稍候..."):
+        with st.spinner("正在从东方财富拉取并更新数据，请稍候..."):
             updated, skipped, errors, report = run_update(dry_run=False)
         return True, f"更新完成：更新 {updated} 个板块，跳过 {skipped} 个，错误 {errors} 个。"
     except Exception as e:
         logger.exception("手动刷新数据失败")
         return False, f"刷新失败：{e}"
+
+
+@st.cache_resource
+def ensure_universe():
+    """看板启动时确保板块宇宙(东财行业)就绪，并刷新 SQLite 板块元数据。"""
+    try:
+        from data.sources import get_data_source
+        from data.sector_universe import ensure_em_industry_map
+        from data.storage.sqlite_store import SQLiteStore
+        src = get_data_source()
+        ensure_em_industry_map(src)
+        SQLiteStore().ensure_sectors()
+    except Exception as e:
+        logger.warning(f"板块宇宙初始化失败: {e}")
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -166,6 +180,9 @@ def main():
         initial_sidebar_state="expanded",
     )
 
+    # 启动时确保板块宇宙(东财行业)就绪，并刷新 SQLite 板块元数据
+    ensure_universe()
+
     # ================================================================
     # 侧边栏
     # ================================================================
@@ -176,13 +193,13 @@ def main():
         # 数据状态与手动刷新
         st.markdown("### 📡 数据状态")
 
-        akshare_date = get_latest_akshare_date()
+        source_date = get_latest_source_date()
         local_date, summary_df = get_local_data_status()
 
         col1, col2 = st.columns(2)
         with col1:
-            st.caption("AkShare 最新交易日")
-            st.markdown(f"**{akshare_date or '—'}**")
+            st.caption("东财最新交易日")
+            st.markdown(f"**{source_date or '—'}**")
         with col2:
             st.caption("本地最新数据日期")
             st.markdown(f"**{local_date or '—'}**")

@@ -258,6 +258,15 @@ def run_update(dry_run: bool = False) -> tuple:
     parquet = ParquetStore()
     freshness = DataFreshness()
 
+    # 0. 确保板块宇宙就绪（东财行业清单 → config.sector_map），并刷新 SQLite 元数据
+    try:
+        from data.sector_universe import ensure_em_industry_map
+        ensure_em_industry_map(source)
+        from data.storage.sqlite_store import SQLiteStore
+        SQLiteStore().ensure_sectors()
+    except Exception as e:
+        logger.warning("板块宇宙初始化失败(非致命，下游可能无板块): %s", e)
+
     # 1. 拉取最新板块行情
     updated, skipped, sector_errors = update_all_sectors(
         source, parquet, freshness, dry_run=dry_run
