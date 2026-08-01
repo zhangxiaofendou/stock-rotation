@@ -80,12 +80,37 @@ def load_market_data():
     # 状态分布
     state_dist = sm.get_state_distribution()
 
-    # 计算涨跌统计
+    # 计算当日涨跌分布（基于 parquet index_hist 最新日涨跌幅，而非均线趋势）
     up_count = down_count = flat_count = 0
-    if state_df is not None:
-        up_count = int((state_df["trend"] == "上涨").sum())
-        down_count = int((state_df["trend"] == "下跌").sum())
-        flat_count = int((state_df["trend"] == "横盘").sum())
+    if state_df is not None and not state_df.empty:
+        parquet_store, _ = get_stores()
+        latest_date = state_df["date"].iloc[0]
+        pct_rows = []
+        for _, row in state_df.iterrows():
+            code = row["sector_code"]
+            df = parquet_store.load_index_hist(code)
+            if df is None or df.empty:
+                continue
+            df = df.copy()
+            # 同花顺 K 线落盘为中文列，统一映射
+            col_map = {"日期": "date", "涨跌幅": "pct_change"}
+            df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+            if "date" not in df.columns or "pct_change" not in df.columns:
+                continue
+            df["date"] = df["date"].astype(str).str[:10]
+            row_today = df[df["date"] == str(latest_date)]
+            if row_today.empty:
+                continue
+            try:
+                pct = float(row_today["pct_change"].iloc[-1])
+                pct_rows.append(pct)
+            except Exception:
+                continue
+        if pct_rows:
+            arr = np.array(pct_rows)
+            up_count = int((arr > 0.01).sum())      # > +0.01%
+            down_count = int((arr < -0.01).sum())   # < -0.01%
+            flat_count = int(((arr >= -0.01) & (arr <= 0.01)).sum())
 
     # 板块分组统计
     group_stats = {}
@@ -230,9 +255,10 @@ def _render_market_overview():
         st.info(f"**状态**: {reason}")
 
     # ================================================================
-    # 涨跌统计条
+    # 涨跌统计条（当日涨跌幅口径）
     # ================================================================
     st.subheader("涨跌分布")
+    st.caption(f"基于各板块 {state_df['date'].iloc[0] if state_df is not None else ''} 当日涨跌幅统计（>+0.01% 为涨，<-0.01% 为跌）")
     total = up_count + down_count + flat_count
     if total > 0:
         c1, c2, c3 = st.columns(3)
@@ -243,12 +269,12 @@ def _render_market_overview():
         with c3:
             st.metric("下跌板块", down_count, delta=f"{down_count/total:.1%}")
 
-        # 涨跌比柱状图
+        # 涨跌比柱状图（中国股市惯例：涨红跌绿）
         fig_bar = go.Figure()
         fig_bar.add_trace(go.Bar(
             x=["上涨", "横盘", "下跌"],
             y=[up_count, flat_count, down_count],
-            marker_color=["#4CAF50", "#9E9E9E", "#F44336"],
+            marker_color=["#F44336", "#9E9E9E", "#4CAF50"],
             text=[up_count, flat_count, down_count],
             textposition="auto",
         ))
