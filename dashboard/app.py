@@ -26,7 +26,7 @@ logger = get_logger(__name__)
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_latest_source_date() -> str:
-    """查询数据源(东方财富)最新交易日（取沪深300基准的最新日期）。
+    """查询数据源最新交易日（取沪深300基准的最新日期）。
 
     返回空字符串表示查询失败，避免阻塞看板渲染。
     """
@@ -88,7 +88,7 @@ def run_manual_data_update():
     """执行手动数据刷新，返回 (success, message)"""
     try:
         from data.daily_update import run_update
-        with st.spinner("正在从东方财富拉取并更新数据，请稍候..."):
+        with st.spinner("正在从数据源拉取并更新数据，请稍候..."):
             updated, skipped, errors, report = run_update(dry_run=False)
         return True, f"更新完成：更新 {updated} 个板块，跳过 {skipped} 个，错误 {errors} 个。"
     except Exception as e:
@@ -98,7 +98,7 @@ def run_manual_data_update():
 
 @st.cache_resource
 def ensure_universe():
-    """看板启动时确保板块宇宙(东财行业)就绪，并刷新 SQLite 板块元数据。"""
+    """看板启动时确保板块宇宙(同花顺行业)就绪，并刷新 SQLite 板块元数据。"""
     try:
         from data.sources import get_data_source
         from data.sector_universe import ensure_em_industry_map
@@ -332,7 +332,7 @@ def main():
 
         col1, col2 = st.columns(2)
         with col1:
-            st.caption("东财最新交易日")
+            st.caption("数据源最新交易日")
             st.markdown(f"**{source_date or '—'}**")
         with col2:
             st.caption("本地最新数据日期")

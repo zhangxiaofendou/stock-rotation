@@ -1,7 +1,7 @@
 """
 每日增量数据更新脚本
 ====================
-每天收盘后运行一次，拉取所有板块最新行情数据，合并到 Parquet 存储，
+每天收盘后运行一次，拉取所有同花顺行业板块最新行情数据，合并到 Parquet 存储，
 并清除快照缓存使 Dashboard 下次刷新时重新计算。
 
 用法:
@@ -68,10 +68,10 @@ def invalidate_snapshots():
 def update_all_sectors(source: BaseDataSource, parquet: ParquetStore,
                        freshness: DataFreshness, dry_run: bool = False):
     """
-    增量更新所有申万二级板块的行情数据。
+    增量更新所有同花顺行业板块（881xxx）的行情数据。
 
     逻辑：
-    1. 从 AkShare 拉取全量历史数据
+    1. 从当前数据源（同花顺为主）拉取全量历史数据
     2. 与本地已有数据合并（按日期去重）
     3. 如果无新数据则跳过该板块
 
@@ -85,7 +85,7 @@ def update_all_sectors(source: BaseDataSource, parquet: ParquetStore,
     errors = 0
 
     logger.info(f"=" * 60)
-    logger.info(f"开始增量更新 {total} 个板块（{'预览模式' if dry_run else '正式模式'}）")
+    logger.info(f"开始增量更新 {total} 个同花顺行业板块（{'预览模式' if dry_run else '正式模式'}）")
     logger.info(f"=" * 60)
 
     for i, code in enumerate(codes):
@@ -93,10 +93,10 @@ def update_all_sectors(source: BaseDataSource, parquet: ParquetStore,
         prefix = f"[{i+1}/{total}]"
 
         try:
-            # 1. 从 AkShare 拉取全量历史
+            # 1. 从当前数据源拉取全量历史（同花顺行业 K 线）
             df_new = source.get_sw_index_hist(symbol=code, period="day")
             if df_new is None or df_new.empty:
-                logger.warning(f"{prefix} {code} {name}: AkShare 返回空数据")
+                logger.warning(f"{prefix} {code} {name}: 数据源返回空数据")
                 errors += 1
                 continue
 
@@ -196,7 +196,7 @@ def update_all_sectors(source: BaseDataSource, parquet: ParquetStore,
 
     # 汇总
     logger.info(f"=" * 60)
-    logger.info(f"增量更新完成: 更新 {updated}, 跳过 {skipped}, 错误 {errors}")
+    logger.info(f"同花顺行业板块增量更新完成: 更新 {updated}, 跳过 {skipped}, 错误 {errors}")
     logger.info(f"=" * 60)
 
     return updated, skipped, errors
@@ -248,6 +248,56 @@ def update_benchmarks(source: BaseDataSource, parquet: ParquetStore,
     return updated, errors
 
 
+def _cleanup_legacy_sector_data(parquet: ParquetStore, freshness: DataFreshness):
+    """切换数据源后清理旧 sector_hist 记录（申万 801xxx.SI / 东财 BKxxxx）。
+
+    当前板块宇宙已切换为同花顺 881xxx，旧代码格式的 parquet 文件与新鲜度记录
+    不再参与后续计算，保留会导致 dashboard 汇总仍显示旧日期。
+    """
+    from config.sector_map import SW_LEVEL2_MAP
+    valid_codes = set(SW_LEVEL2_MAP.keys())
+
+    # 1) 清理 data_freshness 中格式不符的旧记录
+    try:
+        df = freshness.store.get_freshness_report()
+        if not df.empty:
+            stale = df.loc[
+                (df["data_type"] == "sector_hist") &
+                (~df["data_key"].isin(valid_codes)),
+                "data_key"
+            ].tolist()
+            for key in stale:
+                freshness.store.delete_freshness("sector_hist", key)
+            if stale:
+                logger.info("清理旧 sector_hist 新鲜度记录 %d 条", len(stale))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("清理旧 sector_hist 新鲜度记录失败: %s", e)
+
+    # 2) 清理 parquet/index_hist / indicators/* 下非当前宇宙代码的旧文件
+    try:
+        removed = []
+        dirs_to_clean = [parquet.index_hist_dir]
+        indicators_dir = parquet.base_dir / "indicators"
+        if indicators_dir.exists():
+            dirs_to_clean.extend(indicators_dir.iterdir())
+        for d in dirs_to_clean:
+            if not d.is_dir():
+                continue
+            for f in d.glob("*.parquet"):
+                # 文件名如 "801010_SI.parquet" 或 "BK0474.parquet"
+                fname = f.stem
+                if fname.startswith("benchmark_"):
+                    continue
+                code = fname.replace("_", ".")
+                if code not in valid_codes:
+                    f.unlink()
+                    removed.append(code)
+        if removed:
+            logger.info("清理旧 sector Parquet 文件 %d 个", len(removed))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("清理旧 sector Parquet 文件失败: %s", e)
+
+
 def run_update(dry_run: bool = False) -> tuple:
     """执行完整的数据更新流程（可被 Streamlit 看板调用）。
 
@@ -258,12 +308,15 @@ def run_update(dry_run: bool = False) -> tuple:
     parquet = ParquetStore()
     freshness = DataFreshness()
 
-    # 0. 确保板块宇宙就绪（东财行业清单 → config.sector_map），并刷新 SQLite 元数据
+    # 0. 确保板块宇宙就绪（同花顺行业清单 → config.sector_map），并刷新 SQLite 元数据
     try:
         from data.sector_universe import ensure_em_industry_map
-        ensure_em_industry_map(source)
+        em_map = ensure_em_industry_map(source)
         from data.storage.sqlite_store import SQLiteStore
         SQLiteStore().ensure_sectors()
+        # 切源后清理旧 sector_hist 数据，避免 dashboard 仍显示旧日期
+        if em_map and any(len(k) == 6 and k.isdigit() for k in em_map.keys()):
+            _cleanup_legacy_sector_data(parquet, freshness)
     except Exception as e:
         logger.warning("板块宇宙初始化失败(非致命，下游可能无板块): %s", e)
 
@@ -284,7 +337,7 @@ def run_update(dry_run: bool = False) -> tuple:
         # 清除状态快照，Dashboard 下次刷新时自动重新计算
         invalidate_snapshots()
     else:
-        logger.info("板块与基准指数均无新增数据，跳过快照清除")
+        logger.info("同花顺行业板块与基准指数均无新增数据，跳过快照清除")
 
     # 3. 生成数据新鲜度报告
     report = freshness.generate_report()

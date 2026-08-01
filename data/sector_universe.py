@@ -1,14 +1,14 @@
 """
-东财行业宇宙加载器
+同花顺行业宇宙加载器
 ==================
-负责把「东方财富行业板块清单」喂给 config.sector_map，构建系统板块宇宙。
+负责把「同花顺行业板块清单」喂给 config.sector_map，构建系统板块宇宙。
 
 获取顺序（确保云端/离线都可用）：
   1. 本地缓存 JSON（config/em_industry_universe.json）—— 首次成功拉取后写入，
-     之后离线或东财接口抖动时直接复用，避免空宇宙。
-  2. 数据源实时拉取（EastMoneyLiveSource.get_em_industry_list）—— 云端可用，
-     返回 {BKxxxx: 名称}。
-  3. 兜底：若以上皆空，保留缓存（或空），并打日志警示。
+     之后离线或同花顺接口抖动时直接复用，避免空宇宙。
+  2. 数据源实时拉取（THSDataSource.get_em_industry_list）—— 云端可用，
+     返回 {881xxx: 名称}。
+  3. 兜底：若以上皆空，启用静态兜底映射（90 个 881xxx 行业），保证宇宙不空。
 
 调用时机（任一入口首步）：
   - 看板启动（dashboard/app.py）
@@ -36,7 +36,7 @@ def _load_cache() -> dict:
             if isinstance(data, dict) and data:
                 return data
         except Exception as e:
-            logger.warning("读取东财行业缓存失败: %s", e)
+            logger.warning("读取行业清单缓存失败: %s", e)
     return {}
 
 
@@ -45,9 +45,9 @@ def _save_cache(em_map: dict):
         os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
         with open(CACHE_PATH, "w", encoding="utf-8") as f:
             json.dump(em_map, f, ensure_ascii=False, indent=2)
-        logger.info("东财行业清单已缓存 (%d 个): %s", len(em_map), CACHE_PATH)
+        logger.info("行业清单已缓存 (%d 个): %s", len(em_map), CACHE_PATH)
     except Exception as e:
-        logger.warning("缓存东财行业清单失败: %s", e)
+        logger.warning("缓存行业清单失败: %s", e)
 
 
 def _is_cache_compatible(source, cached: dict) -> bool:
@@ -69,7 +69,7 @@ def _is_cache_compatible(source, cached: dict) -> bool:
 
 
 def ensure_em_industry_map(source, force: bool = False) -> dict:
-    """确保板块宇宙已就绪：拉取清单并填充 config.sector_map。
+    """确保同花顺板块宇宙已就绪：拉取清单并填充 config.sector_map。
 
     参数:
         source: 任意 BaseDataSource 实例（需实现 get_em_industry_list）。
@@ -104,7 +104,7 @@ def ensure_em_industry_map(source, force: bool = False) -> dict:
 
     if not em_map:
         logger.error(
-            "行业清单为空：无法构建板块宇宙。请检查网络（云端）或缓存文件 %s",
+            "同花顺行业清单为空：无法构建板块宇宙。请检查网络（云端）或缓存文件 %s",
             CACHE_PATH,
         )
     else:
