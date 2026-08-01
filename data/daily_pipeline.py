@@ -180,6 +180,53 @@ def data_is_current(target: str) -> bool:
     return mt.strftime("%Y-%m-%d") >= target and mr.strftime("%Y-%m-%d") >= target
 
 
+def _record_parquet_freshness(data_type: str, directory: str, col: str = "date",
+                              freshness: DataFreshness = None) -> str:
+    """记录 parquet 目录的最新日期到 data_freshness（无 key 聚合）。"""
+    f = freshness or DataFreshness()
+    mx = _max_date_in_dir(directory, col=col)
+    end_date = mx.strftime("%Y-%m-%d") if mx is not None else None
+    count = 0
+    if os.path.isdir(directory):
+        count = len([fn for fn in os.listdir(directory) if fn.endswith(".parquet")])
+    f.record_update(
+        data_type=data_type,
+        data_key=None,
+        data_end=end_date,
+        record_count=count,
+        status="ok" if end_date else "stale",
+    )
+    return end_date
+
+
+def _record_sqlite_freshness(data_type: str, date_sql: str, count_sql: str,
+                             freshness: DataFreshness = None) -> str:
+    """记录 SQLite 表最新日期与行数到 data_freshness（无 key 聚合）。"""
+    f = freshness or DataFreshness()
+    sqlite = SQLiteStore()
+    end_date = None
+    count = 0
+    try:
+        conn = sqlite._get_conn()
+        try:
+            row = conn.execute(date_sql).fetchone()
+            end_date = row[0] if row and row[0] else None
+            row = conn.execute(count_sql).fetchone()
+            count = row[0] if row and row[0] else 0
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning(f"记录 {data_type} 新鲜度失败: {e}")
+    f.record_update(
+        data_type=data_type,
+        data_key=None,
+        data_end=end_date,
+        record_count=count,
+        status="ok" if end_date else "stale",
+    )
+    return end_date
+
+
 def update_benchmarks():
     """同步更新基准指数与新鲜度记录，复用手动刷新唯一实现。"""
     updated, errors = refresh_benchmarks(
@@ -435,8 +482,27 @@ def main():
     try:
         if data_is_current(target):
             logger.info(f"数据已为最新交易日 {target} 收盘，无需更新（幂等跳过）。")
+            # 刷新各产物新鲜度，保证「数据状态」表格完整
+            _record_parquet_freshness("indicators/rs", os.path.join(str(PARQUET_DIR), "indicators", "rs"))
+            _record_parquet_freshness("indicators/crowding", os.path.join(str(PARQUET_DIR), "indicators", "crowding"))
+            _record_parquet_freshness("indicators/trend", TREND_DIR)
+            _record_sqlite_freshness(
+                "sector_fund_flow",
+                "SELECT date FROM sector_fund_flow ORDER BY date DESC LIMIT 1",
+                "SELECT COUNT(*) FROM sector_fund_flow",
+            )
+            _record_sqlite_freshness(
+                "sector_divergence",
+                "SELECT date FROM sector_divergence ORDER BY date DESC LIMIT 1",
+                "SELECT COUNT(*) FROM sector_divergence",
+            )
             # 即便行情和指标已是最新，也同步账本：首次上线、状态规则升级后可补齐历史事件。
             sync_signal_events()
+            _record_sqlite_freshness(
+                "signal_events",
+                "SELECT event_date FROM signal_events ORDER BY event_date DESC LIMIT 1",
+                "SELECT COUNT(*) FROM signal_events",
+            )
             steps.append("信号事件同步: ok")
             # 同步账本后增量补全信号后续表现，保证绩效数据不滞后。
             enrich_signal_performance()
@@ -461,18 +527,36 @@ def main():
             steps.append("基准指数: ok")
             # 3. RS 指标 + 横截面排名
             run_module("indicators.calc_all")
+            _record_parquet_freshness("indicators/rs", os.path.join(str(PARQUET_DIR), "indicators", "rs"))
+            _record_parquet_freshness("indicators/crowding", os.path.join(str(PARQUET_DIR), "indicators", "crowding"))
             steps.append("RS/横截面: ok")
             # 4. 绝对价格趋势落盘（state_machine / scoring 读取）
             recompute_trends()
+            _record_parquet_freshness("indicators/trend", TREND_DIR)
             steps.append("价格趋势: ok")
             # 4.5 确认因子落盘（资金流 + 分化度），无网络/无数据则优雅跳过
             try:
                 enrich_confirmation_factors(target)
+                _record_sqlite_freshness(
+                    "sector_fund_flow",
+                    "SELECT date FROM sector_fund_flow ORDER BY date DESC LIMIT 1",
+                    "SELECT COUNT(*) FROM sector_fund_flow",
+                )
+                _record_sqlite_freshness(
+                    "sector_divergence",
+                    "SELECT date FROM sector_divergence ORDER BY date DESC LIMIT 1",
+                    "SELECT COUNT(*) FROM sector_divergence",
+                )
                 steps.append("确认因子: ok")
             except Exception as e:
                 steps.append(f"确认因子: 跳过({e})")
             # 5. 状态已经按最新指标重算，固化发生变化的状态事件供绩效/回放/报告复用。
             sync_signal_events()
+            _record_sqlite_freshness(
+                "signal_events",
+                "SELECT event_date FROM signal_events ORDER BY event_date DESC LIMIT 1",
+                "SELECT COUNT(*) FROM signal_events",
+            )
             steps.append("信号事件同步: ok")
             # 6. 补齐最近窗口信号事件的后续实际表现（T+5/T+20 收益、成败判定）。
             enrich_signal_performance()
