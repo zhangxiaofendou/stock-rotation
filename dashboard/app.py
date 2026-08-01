@@ -30,6 +30,9 @@ logger = get_logger(__name__)
 # ============================================================
 PIPELINE_PROGRESS_PATH = LOG_DIR / "pipeline_progress.json"
 
+# 云端新部署时 logs/ 目录可能不存在，必须先创建，否则进度文件写入会静默失败
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def _load_progress() -> Dict[str, Any]:
     try:
@@ -42,11 +45,12 @@ def _load_progress() -> Dict[str, Any]:
 
 def _save_progress(state: Dict[str, Any]):
     try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
         PIPELINE_PROGRESS_PATH.write_text(
             json.dumps(state, ensure_ascii=False), encoding="utf-8"
         )
     except Exception:
-        pass
+        logger.exception("写入管线进度文件失败")
 
 
 class _PipelineProgressHandler(logging.Handler):
