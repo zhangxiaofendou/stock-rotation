@@ -8,6 +8,10 @@ import streamlit as st
 import sys
 import os
 import time
+import json
+import threading
+import datetime
+import logging
 from typing import Dict, Any
 
 # 确保项目根目录在 Python path 中
@@ -15,10 +19,80 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 
+from config.settings import LOG_DIR
 from data.storage.sqlite_store import SQLiteStore
 from config.logger import get_logger
 
 logger = get_logger(__name__)
+
+# ============================================================
+# 手动刷新：后台线程 + 进度轮询（避免 Streamlit 同步阻塞导致进程被杀）
+# ============================================================
+PIPELINE_PROGRESS_PATH = LOG_DIR / "pipeline_progress.json"
+
+
+def _load_progress() -> Dict[str, Any]:
+    try:
+        if PIPELINE_PROGRESS_PATH.exists():
+            return json.loads(PIPELINE_PROGRESS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _save_progress(state: Dict[str, Any]):
+    try:
+        PIPELINE_PROGRESS_PATH.write_text(
+            json.dumps(state, ensure_ascii=False), encoding="utf-8"
+        )
+    except Exception:
+        pass
+
+
+class _PipelineProgressHandler(logging.Handler):
+    """把管线运行日志的最新一行写入进度文件，供前端轮询展示。"""
+
+    def emit(self, record):
+        try:
+            state = _load_progress()
+            if state.get("status") != "running":
+                return
+            state["current_step"] = record.getMessage()[:300]
+            state["last_heartbeat"] = datetime.datetime.now().isoformat()
+            _save_progress(state)
+        except Exception:
+            pass
+
+
+def _background_pipeline_run():
+    """后台线程入口：执行完整数据管线，实时更新进度文件。"""
+    try:
+        _save_progress({
+            "status": "running",
+            "started_at": datetime.datetime.now().isoformat(timespec="seconds"),
+            "last_heartbeat": datetime.datetime.now().isoformat(timespec="seconds"),
+            "current_step": "管线启动中...",
+            "error": None,
+        })
+        handler = _PipelineProgressHandler()
+        logging.getLogger().addHandler(handler)  # 挂到 root，捕获所有子模块日志
+        try:
+            from data.daily_pipeline import main as run_pipeline
+            run_pipeline()
+            state = _load_progress()
+            state["status"] = "done"
+            state["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+            state["current_step"] = "管线执行完成"
+            _save_progress(state)
+        finally:
+            logging.getLogger().removeHandler(handler)
+    except Exception as e:
+        import traceback
+        state = _load_progress()
+        state["status"] = "failed"
+        state["finished_at"] = datetime.datetime.now().isoformat(timespec="seconds")
+        state["error"] = f"{e}\n{traceback.format_exc()[-1500:]}"
+        _save_progress(state)
 
 
 # ============================================================
@@ -84,24 +158,27 @@ def get_local_data_status():
     return latest_date, pd.DataFrame(rows)
 
 
-def run_manual_data_update():
-    """执行手动数据刷新，返回 (success, message)
+def run_manual_data_update() -> tuple:
+    """启动后台线程执行完整数据管线（非阻塞），返回 (started, message)。
 
-    旧实现只跑 data.daily_update（行情+基准），不会重算 RS/趋势/资金流，
-    导致看板用旧指标或旧快照。改为执行完整 data.daily_pipeline，
-    一次刷新把行情、基准、RS、趋势、资金流、分化度、信号事件全部补到最新交易日。
+    旧实现用 st.spinner 同步跑 5–10 分钟，Streamlit websocket 超时把脚本进程杀掉，
+    导致资金流/板块组等后续步骤总是跑不到。改为后台线程 + 进度文件轮询，
+    点击按钮立即返回，管线在后台跑，前端定时 rerun 读取进度。
     """
+    state = _load_progress()
+    if state.get("status") == "running":
+        return False, "管线正在后台运行中，侧栏可见实时进度，请耐心等待（约 5–10 分钟）。"
+
+    # 清除可能存在的旧进度文件，避免误判为仍在进行
     try:
-        from data.daily_pipeline import main as run_pipeline
-        with st.spinner("正在执行完整数据管线（行情 → 基准 → RS/趋势 → 资金流/分化度 → 信号事件），约需 5–10 分钟，请保持页面打开..."):
-            run_pipeline()
-        # 管线会删除 state_snapshot，但 Streamlit 的 @st.cache_data 仍可能返回旧结果，
-        # 因此清空所有缓存，让下次渲染强制重新计算。
-        st.cache_data.clear()
-        return True, "完整数据管线执行完成，页面缓存已清空，请等待自动刷新或手动刷新页面。"
-    except Exception as e:
-        logger.exception("手动刷新数据失败")
-        return False, f"刷新失败：{e}"
+        if PIPELINE_PROGRESS_PATH.exists():
+            PIPELINE_PROGRESS_PATH.unlink()
+    except Exception:
+        pass
+
+    t = threading.Thread(target=_background_pipeline_run, daemon=True)
+    t.start()
+    return True, "已启动完整数据管线（后台运行，约 5–10 分钟）。完成后页面会自动刷新；也可随时手动刷新查看进度。"
 
 
 @st.cache_resource
@@ -156,6 +233,50 @@ def get_run_observability() -> Dict[str, Any]:
     except Exception as e:
         logger.warning(f"运行保障信息读取失败: {e}")
     return out
+
+
+def _render_pipeline_progress():
+    """侧栏展示后台管线运行进度（轮询 + 自动刷新）。"""
+    state = _load_progress()
+    if not state:
+        return
+    status = state.get("status")
+
+    if status == "running":
+        step = state.get("current_step", "")
+        st.info(f"⏳ **管线运行中**\n\n{step}")
+        # 心跳超时（>30 分钟无更新）视为卡死
+        stuck = False
+        hb = state.get("last_heartbeat")
+        if hb:
+            try:
+                dt = datetime.datetime.fromisoformat(hb)
+                if (datetime.datetime.now() - dt).total_seconds() > 1800:
+                    stuck = True
+            except Exception:
+                pass
+        if stuck:
+            st.error("⚠️ 管线超过 30 分钟无进度更新，可能已卡死。可重新点击「手动刷新全部数据」重试。")
+        else:
+            st.caption("每 5 秒自动刷新进度，请保持页面打开…")
+            time.sleep(5)
+            st.rerun()
+    elif status == "done":
+        st.success(f"✅ **管线已完成**（{state.get('finished_at', '')}）")
+        st.info("页面缓存已刷新，可在各模块查看最新数据。")
+        try:
+            if PIPELINE_PROGRESS_PATH.exists():
+                PIPELINE_PROGRESS_PATH.unlink()
+            st.cache_data.clear()
+        except Exception:
+            pass
+    elif status == "failed":
+        st.error(f"❌ **管线运行失败**\n\n{state.get('error', '')[:800]}")
+        try:
+            if PIPELINE_PROGRESS_PATH.exists():
+                PIPELINE_PROGRESS_PATH.unlink()
+        except Exception:
+            pass
 
 
 def _render_run_observability():
@@ -351,9 +472,12 @@ def main():
             success, msg = run_manual_data_update()
             if success:
                 st.success(msg)
-                st.rerun()
             else:
-                st.error(msg)
+                st.warning(msg)
+            st.rerun()
+
+        # 后台管线进度展示（运行中实时轮询，完成后自动刷新页面）
+        _render_pipeline_progress()
 
         # 盘中实时刷新开关
         live_realtime = st.checkbox(

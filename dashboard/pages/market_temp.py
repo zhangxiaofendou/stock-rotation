@@ -130,19 +130,29 @@ def _render_fund_flow_map():
     sqlite = SQLiteStore()
     latest = sqlite.get_latest_fund_flow_date()
     if latest is None:
-        st.info("资金流数据尚未落盘（每日管线在线运行时自动填充；当前环境无数据）。")
+        ff_total = len(sqlite.get_sector_fund_flow())
+        st.warning(
+            "资金流数据尚未落盘。\n\n"
+            f"- `sector_fund_flow` 表当前行数：**{ff_total}**\n\n"
+            "请点击侧栏「🔄 手动刷新全部数据」运行完整管线（约 5–10 分钟，后台运行）。"
+        )
         return
     df = sqlite.get_sector_fund_flow(date=latest)
     if df is None or df.empty:
-        st.info("资金流数据尚未落盘。")
+        st.warning(f"资金流表存在（最新日期 **{latest}**），但当日无记录。请重新运行手动刷新。")
         return
 
     df = df.copy()
     df["name"] = df["sector_code"].map(lambda c: get_sector_name(c))
-    df = df.dropna(subset=["rank"]).sort_values("rank")
-    if df.empty:
-        st.info("资金流数据无有效排名。")
+    valid = df.dropna(subset=["rank"])
+    if valid.empty:
+        st.warning(
+            f"资金流数据无有效排名（{latest}）。\n\n"
+            f"当日共 **{len(df)}** 条记录，但 `rank` 字段全部为空，"
+            "说明资金流回退计算未生成排名。请重新运行手动刷新，并在侧栏查看运行保障日志。"
+        )
         return
+    df = valid.sort_values("rank")
 
     top_in = df.head(10)
     top_out = df.tail(10).sort_values("rank", ascending=False)
