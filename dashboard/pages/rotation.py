@@ -797,6 +797,17 @@ def render():
     st.title("板块轮动监控")
     st.markdown("九宫格热力图、板块详情、个股下钻、趋势验证")
 
+    # 诊断：显示当前代码版本，确认 Streamlit Cloud 部署到了预期提交
+    st.caption("diag: rotation.py @ 84fbd5b-fix")
+
+    # 部署后首次渲染强制清除旧的失败缓存，避免 @st.cache_data 把历史 None 结果续命 24h
+    if "rotation_cache_cleared_v84fbd5b" not in st.session_state:
+        try:
+            st.cache_data.clear()
+        except Exception:
+            pass
+        st.session_state["rotation_cache_cleared_v84fbd5b"] = True
+
     with st.spinner("加载轮动数据..."):
         try:
             state_df = load_state_df()
