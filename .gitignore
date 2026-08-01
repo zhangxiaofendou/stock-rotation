@@ -11,6 +11,9 @@ venv/
 
 # Cache
 data/storage/parquet/cache/
+!data/storage/parquet/cache/
+data/storage/parquet/cache/**
+!data/storage/parquet/cache/state_snapshot.parquet
 .pytest_cache/
 
 # Logs

@@ -798,11 +798,18 @@ def render():
     st.markdown("九宫格热力图、板块详情、个股下钻、趋势验证")
 
     with st.spinner("加载轮动数据..."):
-        state_df = load_state_df()
-        score_df = load_score_df()
+        try:
+            state_df = load_state_df()
+            score_df = load_score_df()
+        except Exception as e:
+            import traceback
+            st.error("板块状态加载失败（已捕获异常，非静默空白）：")
+            st.code(traceback.format_exc(), language="text")
+            st.info("请将以上报错文本贴给开发者，便于定位云端运行环境差异。")
+            return
 
     if state_df is None or state_df.empty:
-        st.warning("暂无数据，请先运行数据更新流程")
+        st.warning("暂无数据：全量计算与快照缓存均未产出结果，请先运行数据更新流程")
         return
 
     # ================================================================
