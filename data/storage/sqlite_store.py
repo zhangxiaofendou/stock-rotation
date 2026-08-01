@@ -242,6 +242,17 @@ class SQLiteStore:
         try:
             conn = self._get_conn()
             conn.executescript(CREATE_TABLES_SQL)
+            # 数据新鲜度去重 + 唯一约束：历史版本用 INSERT（无唯一约束）导致同
+            # (data_type, data_key) 重复记录堆积。先按 (data_type, data_key) 保留最新
+            # 一条，再建唯一索引，使后续 record_update 的 INSERT OR REPLACE 真正生效。
+            conn.execute(
+                "DELETE FROM data_freshness WHERE rowid NOT IN ("
+                "SELECT MAX(rowid) FROM data_freshness GROUP BY data_type, data_key)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_freshness_type_key "
+                "ON data_freshness(data_type, data_key)"
+            )
             conn.commit()
             conn.close()
             logger.info(f"SQLite 数据库初始化完成: {self.db_path}")

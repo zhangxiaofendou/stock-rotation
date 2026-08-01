@@ -150,7 +150,12 @@ def render():
 def _render_fund_flow_map():
     """资金流向地图：展示当日行业资金流净流入/净流出排名前列板块（来自每日管线落盘）。"""
     st.subheader("资金流向地图")
-    st.caption("行业主力资金净流入排名，来自每日管线落盘的 sector_fund_flow；离线/未更新时显示提示。")
+    st.caption("行业资金流向地图（由板块当日涨跌幅代理主力净流入，非同花顺真实主力资金流）。")
+    st.info(
+        "⚠️ 口径说明：当前「资金流向」是用板块**当日涨跌幅**代理的**主力净流入排名**，"
+        "并非同花顺真实的行业主力资金流。对「价涨资退 / 价跌资进」的背离板块，此图会与真实资金方向相反，仅供参考。",
+        icon="⚠️",
+    )
 
     sqlite = SQLiteStore()
     latest = sqlite.get_latest_fund_flow_date()
@@ -236,7 +241,8 @@ def _render_market_overview():
             st.success("✅ 正常模式")
 
     with col2:
-        down_ratio = market_status.get("down_ratio", 0)
+        total = up_count + down_count + flat_count
+        down_ratio = down_count / total if total > 0 else 0
         st.metric("下跌板块占比", f"{down_ratio:.1%}")
 
     with col3:
@@ -263,11 +269,11 @@ def _render_market_overview():
     if total > 0:
         c1, c2, c3 = st.columns(3)
         with c1:
-            st.metric("上涨板块", up_count, delta=f"{up_count/total:.1%}")
+            st.metric("上涨板块", up_count, delta=f"+{up_count/total:.1%}")
         with c2:
-            st.metric("横盘板块", flat_count, delta=f"{flat_count/total:.1%}")
+            st.metric("横盘板块", flat_count, delta=f"{flat_count/total:.1%}", delta_color="off")
         with c3:
-            st.metric("下跌板块", down_count, delta=f"{down_count/total:.1%}")
+            st.metric("下跌板块", down_count, delta=f"-{down_count/total:.1%}")
 
         # 涨跌比柱状图（中国股市惯例：涨红跌绿）
         fig_bar = go.Figure()

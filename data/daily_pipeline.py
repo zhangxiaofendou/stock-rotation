@@ -449,6 +449,42 @@ def run_with_retry(mod: str, tries: int = 2, backoff: int = 300) -> int:
     return rc
 
 
+def _backfill_missing_sector_klines():
+    """管线兜底：对照当前板块宇宙，补齐缺失的行业 K 线 parquet。
+
+    根因：当其它板块均已「current」时，data_is_current 守卫会让整条管线跳过，
+    导致个别板块（如 881121 半导体）偶发漏拉后永远不被补齐。此函数在管线末尾
+    无条件执行，确保 90 个同花顺行业 K 线齐全。
+    """
+    try:
+        from data.sources import get_data_source
+        from data.storage.parquet_store import ParquetStore
+        from config.sector_map import SW_LEVEL2_MAP
+
+        parquet = ParquetStore()
+        source = get_data_source()
+        target_codes = list(SW_LEVEL2_MAP.keys())
+        if not target_codes:
+            return
+        missing = [c for c in target_codes if not parquet.index_hist_exists(c)]
+        if not missing:
+            logger.info("行业 K 线齐全（%d 个），无需补齐", len(target_codes))
+            return
+        logger.warning("检测到 %d 个行业 K 线缺失，启动补齐: %s", len(missing), missing)
+        for code in missing:
+            try:
+                df = source.get_sw_index_hist(symbol=code, period="day")
+                if df is not None and not df.empty:
+                    parquet.save_index_hist(code, df)
+                    logger.info("补齐行业 K 线 %s 成功（%d 行）", code, len(df))
+                else:
+                    logger.warning("补齐行业 K 线 %s 仍失败（源返回空）", code)
+            except Exception as e:  # noqa: BLE001
+                logger.warning("补齐行业 K 线 %s 异常: %s", code, e)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("行业 K 线补齐流程异常（非致命）: %s", e)
+
+
 def main():
     run_id = datetime.now().isoformat(timespec="seconds")
     started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -565,6 +601,13 @@ def main():
             generate_daily_report()
             steps.append("盘后报告: ok")
             logger.info(f"========== 每日全量更新管线完成 {today}（已更新至 {target} 收盘）==========")
+
+        # 9. 行业 K 线兜底补齐（无论行情是否 current，确保 90 行业齐全，修复个别板块漏拉）
+        try:
+            _backfill_missing_sector_klines()
+            steps.append("行业K线补齐: ok")
+        except Exception as e:  # noqa: BLE001
+            steps.append(f"行业K线补齐: 跳过({e})")
 
         # 8. 双源校验（AkShare/Tushare），未配置第二数据源则跳过
         try:

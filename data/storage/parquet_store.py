@@ -34,7 +34,7 @@ class ParquetStore:
     # ============================================================
     def _get_index_hist_path(self, code: str) -> Path:
         """获取板块指数历史数据文件路径"""
-        # 按板块代码分区：如 801010/801010_SI.parquet
+        # 按板块代码分区：如 881121.parquet
         safe_code = code.replace(".", "_")
         return self.index_hist_dir / f"{safe_code}.parquet"
 
@@ -43,7 +43,7 @@ class ParquetStore:
         保存板块指数历史数据
 
         参数:
-            code: 板块代码，如 "801010.SI"
+            code: 板块代码，如 "881121"
             df: 历史行情 DataFrame
         """
         if df is None or df.empty:
@@ -100,7 +100,7 @@ class ParquetStore:
         """列出已存储的板块代码"""
         codes = []
         for f in self.index_hist_dir.glob("*.parquet"):
-            # 文件名如 "801010_SI.parquet" → "801010.SI"
+            # 文件名如 "881121.parquet" → "881121"
             code = f.stem.replace("_", ".")
             codes.append(code)
         return codes

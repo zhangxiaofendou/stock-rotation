@@ -68,6 +68,47 @@ def _is_cache_compatible(source, cached: dict) -> bool:
     return True
 
 
+def _purge_legacy_sectors(store: "SQLiteStore", valid_codes: set):
+    """删除不在当前板块宇宙中的旧板块（如申万 801xxx）及其子表 orphan 行。
+
+    切源后这些旧代码仍残留在 sectors / signal_events / signal_performance 等表，
+    会污染下游指标计算与看板汇总，且会被遍历用来加载 K 线（日志里大量
+    `801xxx.SI 历史数据文件不存在` 即源于此）。
+
+    由于外键已开启（PRAGMA foreign_keys=ON），必须先删子表再删父表。
+    仅在 valid_codes 非空时执行，避免误删全部（em_map 为空时不应清理）。
+    """
+    if not valid_codes:
+        return
+    try:
+        conn = store._get_conn()
+        try:
+            legacy = [r[0] for r in conn.execute(
+                "SELECT code FROM sectors WHERE code NOT IN (%s)" % ",".join("?" * len(valid_codes)),
+                tuple(valid_codes),
+            ).fetchall()]
+            if not legacy:
+                return
+            placeholders = ",".join("?" * len(legacy))
+            # 先清子表 orphan 行（外键开启，先子后父）
+            for tbl in ("signal_performance", "signal_events", "sector_stocks",
+                        "benchmark_map", "sector_groups"):
+                try:
+                    conn.execute(
+                        "DELETE FROM %s WHERE sector_code IN (%s)" % (tbl, placeholders),
+                        tuple(legacy),
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.debug("清理旧板块子表 %s 失败(可忽略): %s", tbl, e)
+            conn.execute("DELETE FROM sectors WHERE code IN (%s)" % placeholders, tuple(legacy))
+            conn.commit()
+            logger.info("已清理旧板块残留 %d 个（含申万 801xxx）及其子表 orphan 行", len(legacy))
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("清理旧板块残留失败（非致命）: %s", e)
+
+
 def _sync_sector_meta_to_sqlite(em_map: dict):
     """把当前板块宇宙同步到 SQLite 元数据表（sectors / benchmark_map / sector_groups）。
 
@@ -85,8 +126,11 @@ def _sync_sector_meta_to_sqlite(em_map: dict):
         from data.storage.sqlite_store import SQLiteStore
 
         store = SQLiteStore()
-        # 1) sectors 表（幂等插入，不强制清空；旧 801xxx.SI 可能仍被 signal_events 等外键引用，
-        #    直接 DELETE 会触发 FOREIGN KEY 约束失败。保留旧记录不影响新代码的指标计算。）
+        # 0) 先清理不在当前板块宇宙中的旧板块（如申万 801xxx）及其子表 orphan 行，
+        #    避免残留污染下游指标计算与看板汇总；外键开启，先删子表再删父表。
+        valid_codes = set(SW_LEVEL1_MAP.keys()) | set(SW_LEVEL2_MAP.keys())
+        _purge_legacy_sectors(store, valid_codes)
+        # 1) sectors 表（幂等插入；旧 801xxx.SI 已由上面的清理步骤移除，不再残留）
         rows = []
         for code, name in SW_LEVEL1_MAP.items():
             rows.append((code, name, 1, None, None, None))
