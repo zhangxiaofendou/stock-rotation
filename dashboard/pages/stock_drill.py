@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from data.sources.akshare_source import AkShareSource
+from data.sources import get_data_source
 from data.storage.parquet_store import ParquetStore
 from config.sector_map import SW_LEVEL2_MAP, get_sector_name
 from config.logger import get_logger
@@ -43,7 +43,7 @@ logger = get_logger(__name__)
 # ============================================================
 @st.cache_resource
 def get_source():
-    return AkShareSource()
+    return get_data_source()
 
 
 @st.cache_resource

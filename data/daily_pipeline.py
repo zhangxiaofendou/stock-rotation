@@ -37,7 +37,7 @@ import pandas as pd  # noqa: E402
 from config.logger import get_logger  # noqa: E402
 from config.settings import PARQUET_DIR  # noqa: E402
 from config.sector_map import SW_LEVEL2_MAP  # noqa: E402
-from data.sources.akshare_source import AkShareSource  # noqa: E402
+from data.sources import get_data_source  # noqa: E402
 from data.storage.parquet_store import ParquetStore  # noqa: E402
 from data.storage.sqlite_store import SQLiteStore  # noqa: E402
 from data.freshness import DataFreshness  # noqa: E402
@@ -118,8 +118,7 @@ def ensure_trade_calendar():
         return True
     try:
         from data.calendar import TradeCalendar
-        from data.sources.akshare_source import AkShareSource
-        ok = TradeCalendar(AkShareSource(), sqlite).fetch_and_store()
+        ok = TradeCalendar(get_data_source(), sqlite).fetch_and_store()
         if ok:
             logger.info("交易日历通过 AkShare 初始化完成。")
             return True
@@ -184,7 +183,7 @@ def data_is_current(target: str) -> bool:
 def update_benchmarks():
     """同步更新基准指数与新鲜度记录，复用手动刷新唯一实现。"""
     updated, errors = refresh_benchmarks(
-        AkShareSource(), ParquetStore(), DataFreshness()
+        get_data_source(), ParquetStore(), DataFreshness()
     )
     logger.info(f"基准指数更新完成：成功 {updated}，失败 {errors}")
 
@@ -257,7 +256,7 @@ def enrich_fund_flow(target: str):
     try:
         from indicators.money_flow import MoneyFlowIndicator
         parquet, sqlite = ParquetStore(), SQLiteStore()
-        mfi = MoneyFlowIndicator(parquet, sqlite, AkShareSource())
+        mfi = MoneyFlowIndicator(parquet, sqlite, get_data_source())
 
         # 先探测一次在线可用性：拿不到今日排名则整体跳过
         probe = mfi.calc_sector_fund_flow_rank("今日")

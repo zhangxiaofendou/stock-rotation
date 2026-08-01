@@ -30,6 +30,13 @@ for _dir in [DATA_DIR, CACHE_DIR, PARQUET_DIR, SQLITE_DB_PATH.parent]:
     _dir.mkdir(parents=True, exist_ok=True)
 
 # ============================================================
+# 主数据源选择
+# ============================================================
+# "eastmoney"：东方财富公开接口（行情到最新交易日收盘，无需 token，准实时）
+# "akshare"：原有 AkShare 实现（回退用）
+PRIMARY_DATA_SOURCE = "eastmoney"
+
+# ============================================================
 # AkShare 重试配置
 # ============================================================
 AKSHARE_RETRY_CONFIG = {

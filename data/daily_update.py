@@ -30,7 +30,7 @@ import pandas as pd
 from config.logger import get_logger
 from config.settings import BATCH_SIZE, BATCH_SLEEP
 from config.sector_map import SW_LEVEL2_MAP
-from data.sources.akshare_source import AkShareSource
+from data.sources import get_data_source, BaseDataSource
 from data.storage.parquet_store import ParquetStore
 from data.freshness import DataFreshness
 
@@ -65,7 +65,7 @@ def invalidate_snapshots():
     return deleted
 
 
-def update_all_sectors(source: AkShareSource, parquet: ParquetStore,
+def update_all_sectors(source: BaseDataSource, parquet: ParquetStore,
                        freshness: DataFreshness, dry_run: bool = False):
     """
     增量更新所有申万二级板块的行情数据。
@@ -202,7 +202,7 @@ def update_all_sectors(source: AkShareSource, parquet: ParquetStore,
     return updated, skipped, errors
 
 
-def update_benchmarks(source: AkShareSource, parquet: ParquetStore,
+def update_benchmarks(source: BaseDataSource, parquet: ParquetStore,
                       freshness: DataFreshness, dry_run: bool = False) -> tuple:
     """更新 RS 所依赖的基准指数，并同步修复其新鲜度记录。
 
@@ -254,7 +254,7 @@ def run_update(dry_run: bool = False) -> tuple:
     返回:
         (updated: int, skipped: int, errors: int, report: str)
     """
-    source = AkShareSource()
+    source = get_data_source()
     parquet = ParquetStore()
     freshness = DataFreshness()
 

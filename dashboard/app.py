@@ -30,8 +30,8 @@ def get_latest_akshare_date() -> str:
     返回空字符串表示查询失败，避免阻塞看板渲染。
     """
     try:
-        from data.sources.akshare_source import AkShareSource
-        source = AkShareSource()
+        from data.sources import get_data_source
+        source = get_data_source()
         df = source.get_sw_index_hist(symbol="801010", period="day")
         if df is not None and not df.empty:
             for col in ["date", "日期"]:

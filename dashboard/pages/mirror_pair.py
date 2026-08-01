@@ -16,7 +16,7 @@ from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.mirror_pair import MirrorPair
-from config.sector_map import SECTOR_GROUPS
+from config.sector_map import SECTOR_GROUPS, get_sector_name
 from dashboard.components.state_card import STATE_EMOJI
 
 
@@ -169,13 +169,17 @@ def render_group_capital_path(state_df: pd.DataFrame):
     """
     TOP_N = 6  # 每组最多展开的领先行业数
 
+    def _ind_label(i: dict) -> str:
+        """行业节点标签：显示名称+代码+状态"""
+        return f"{i['name']}\n{i['code']} ({i['state']})"
+
     if state_df is None or state_df.empty:
         st.info("暂无板块状态数据，无法生成板块组资金迁移路径")
         return
 
     # 1) 计算每个板块组、每个行业的净资金流
     group_net = {}
-    group_industries = {}  # group -> [{"name","state","net"}, ...]
+    group_industries = {}  # group -> [{"name","code","state","net"}, ...]
     for gname, ginfo in SECTOR_GROUPS.items():
         codes = set(ginfo["level2_codes"])
         gdf = state_df[state_df["sector_code"].isin(codes)]
@@ -185,8 +189,14 @@ def render_group_capital_path(state_df: pd.DataFrame):
         group_net[gname] = net
         for _, row in gdf.iterrows():
             w = _STATE_FLOW_WEIGHT.get(row["state"], 0.0)
+            code = row["sector_code"]
+            raw_name = row.get("sector_name")
+            name = raw_name if raw_name and str(raw_name).strip() and str(raw_name) != str(code) else get_sector_name(code)
+            if not name:
+                name = code
             group_industries.setdefault(gname, []).append({
-                "name": row.get("sector_name", row["sector_code"]),
+                "name": name,
+                "code": code,
                 "state": row["state"],
                 "net": w,
             })
@@ -221,7 +231,7 @@ def render_group_capital_path(state_df: pd.DataFrame):
     for g in out_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] < 0], key=lambda x: x["net"])
         for i in inds[:TOP_N]:
-            add_node(f"{i['name']}\n({i['state']})", "#EF9A9A")
+            add_node(_ind_label(i), "#EF9A9A")
         if len(inds) > TOP_N:
             add_node(f"{g}·其他{len(inds) - TOP_N}行业\n（净流出）", "#F8BBD0")
     # 净流出板块组（深红）
@@ -234,7 +244,7 @@ def render_group_capital_path(state_df: pd.DataFrame):
     for g in in_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
         for i in inds[:TOP_N]:
-            add_node(f"{i['name']}\n({i['state']})", "#A5D6A7")
+            add_node(_ind_label(i), "#A5D6A7")
         if len(inds) > TOP_N:
             add_node(f"{g}·其他{len(inds) - TOP_N}行业\n（净流入）", "#C8E6C9")
 
@@ -244,7 +254,7 @@ def render_group_capital_path(state_df: pd.DataFrame):
     for g in out_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] < 0], key=lambda x: x["net"])
         for i in inds[:TOP_N]:
-            links_source.append(node_map[f"{i['name']}\n({i['state']})"])
+            links_source.append(node_map[_ind_label(i)])
             links_target.append(node_map[f"{g}\n（净流出）"])
             links_value.append(-i["net"])
             links_color.append("rgba(244,67,54,0.35)")
@@ -269,7 +279,7 @@ def render_group_capital_path(state_df: pd.DataFrame):
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
         for i in inds[:TOP_N]:
             links_source.append(node_map[f"{g}\n（净流入）"])
-            links_target.append(node_map[f"{i['name']}\n({i['state']})"])
+            links_target.append(node_map[_ind_label(i)])
             links_value.append(i["net"])
             links_color.append("rgba(76,175,80,0.35)")
         if len(inds) > TOP_N:
@@ -292,10 +302,10 @@ def render_group_capital_path(state_df: pd.DataFrame):
 
     fig = go.Figure(
         go.Sankey(
-            textfont={"size": 14, "color": "black", "family": "Arial, sans-serif"},
+            textfont={"size": 12, "color": "black", "family": "Arial, sans-serif"},
             node={
-                "pad": 18,
-                "thickness": 24,
+                "pad": 20,
+                "thickness": 22,
                 "line": {"color": "gray", "width": 0.5},
                 "label": node_labels,
                 "color": node_colors,
@@ -313,9 +323,9 @@ def render_group_capital_path(state_df: pd.DataFrame):
             text="板块组之间资金迁移路径（行业 → 组 → 组 → 行业）",
             font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
         ),
-        height=max(420, n_ind_nodes * 16 + 160),
+        height=max(440, n_ind_nodes * 18 + 160),
         margin={"l": 10, "r": 10, "t": 50, "b": 10},
-        font={"size": 14, "color": "black", "family": "Arial, sans-serif"},
+        font={"size": 12, "color": "black", "family": "Arial, sans-serif"},
         paper_bgcolor="white",
     )
     st.plotly_chart(fig, width="stretch", key="group_capital_sankey")
