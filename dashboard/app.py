@@ -85,12 +85,20 @@ def get_local_data_status():
 
 
 def run_manual_data_update():
-    """执行手动数据刷新，返回 (success, message)"""
+    """执行手动数据刷新，返回 (success, message)
+
+    旧实现只跑 data.daily_update（行情+基准），不会重算 RS/趋势/资金流，
+    导致看板用旧指标或旧快照。改为执行完整 data.daily_pipeline，
+    一次刷新把行情、基准、RS、趋势、资金流、分化度、信号事件全部补到最新交易日。
+    """
     try:
-        from data.daily_update import run_update
-        with st.spinner("正在从数据源拉取并更新数据，请稍候..."):
-            updated, skipped, errors, report = run_update(dry_run=False)
-        return True, f"更新完成：更新 {updated} 个板块，跳过 {skipped} 个，错误 {errors} 个。"
+        from data.daily_pipeline import main as run_pipeline
+        with st.spinner("正在执行完整数据管线（行情 → 基准 → RS/趋势 → 资金流/分化度 → 信号事件），约需 5–10 分钟，请保持页面打开..."):
+            run_pipeline()
+        # 管线会删除 state_snapshot，但 Streamlit 的 @st.cache_data 仍可能返回旧结果，
+        # 因此清空所有缓存，让下次渲染强制重新计算。
+        st.cache_data.clear()
+        return True, "完整数据管线执行完成，页面缓存已清空，请等待自动刷新或手动刷新页面。"
     except Exception as e:
         logger.exception("手动刷新数据失败")
         return False, f"刷新失败：{e}"
