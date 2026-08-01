@@ -285,6 +285,17 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    def clear_sectors(self):
+        """清空 sectors 表（切源后重建用）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute("DELETE FROM sectors")
+            conn.commit()
+        except Exception as e:
+            logger.error(f"清空 sectors 失败: {e}")
+        finally:
+            conn.close()
+
     def insert_sectors_batch(self, sectors: List[Tuple]):
         """批量插入板块信息"""
         conn = self._get_conn()

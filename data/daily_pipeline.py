@@ -249,16 +249,25 @@ def enrich_signal_performance():
 
 
 def enrich_fund_flow(target: str):
-    """计算每个板块的资金流信号并落盘（依赖 AkShare 行业资金流排名，在线可用）。
+    """计算每个板块的资金流信号并落盘。
 
-    离线 / 接口异常时探测一次即整体跳过，避免逐板块重试卡顿；不阻断管线。
+    数据源为空时自动从 parquet index_hist 回退（同花顺实时接口常被反爬）。
+    单步失败不阻断其余板块；rec 始终包含全部字段，避免 executemany 绑定缺失。
     """
     try:
         from indicators.money_flow import MoneyFlowIndicator
         parquet, sqlite = ParquetStore(), SQLiteStore()
         mfi = MoneyFlowIndicator(parquet, sqlite, get_data_source())
 
-        # 先探测一次在线可用性：拿不到今日排名则整体跳过
+        # 清除旧的资金流排名缓存，避免跨日/跨源时用上昨日或测试数据
+        try:
+            for cache_path in parquet.fund_flow_dir.glob("sector_fund_flow_*.parquet"):
+                cache_path.unlink()
+                logger.info(f"已清除资金流缓存: {cache_path.name}")
+        except Exception as e:
+            logger.warning(f"清除资金流缓存失败: {e}")
+
+        # 先探测一次数据源可用性
         probe = mfi.calc_sector_fund_flow_rank("今日")
         if probe is None or probe.empty:
             logger.info("资金流数据不可用（离线/接口异常），跳过落盘。")
@@ -266,7 +275,15 @@ def enrich_fund_flow(target: str):
 
         rows = []
         for code in SW_LEVEL2_MAP:
-            rec = {"sector_code": code, "date": target, "signal": "中性"}
+            # 必须提供全部绑定字段，即使某板块计算失败
+            rec = {
+                "sector_code": code,
+                "date": target,
+                "signal": "中性",
+                "rank": None,
+                "rank_change": None,
+                "trend": None,
+            }
             try:
                 sig = mfi.calc_fund_flow_signal(code)
                 rec["signal"] = sig or "中性"
@@ -275,8 +292,8 @@ def enrich_fund_flow(target: str):
                     rec["rank"] = trend.get("current_rank")
                     rec["rank_change"] = trend.get("rank_change")
                     rec["trend"] = trend.get("trend")
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"板块 {code} 资金流计算失败: {e}")
             rows.append(rec)
         sqlite.upsert_sector_fund_flow(rows)
         logger.info(f"资金流落盘完成: {len(rows)} 个板块")

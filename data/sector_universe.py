@@ -85,7 +85,8 @@ def _sync_sector_meta_to_sqlite(em_map: dict):
         from data.storage.sqlite_store import SQLiteStore
 
         store = SQLiteStore()
-        # 1) sectors 表（幂等）
+        # 1) sectors 表（幂等插入，不强制清空；旧 801xxx.SI 可能仍被 signal_events 等外键引用，
+        #    直接 DELETE 会触发 FOREIGN KEY 约束失败。保留旧记录不影响新代码的指标计算。）
         rows = []
         for code, name in SW_LEVEL1_MAP.items():
             rows.append((code, name, 1, None, None, None))

@@ -89,16 +89,38 @@ class MoneyFlowIndicator:
     # ============================================================
     # 核心指标计算
     # ============================================================
-    def _build_fund_flow_from_index_hist(self) -> Optional[pd.DataFrame]:
-        """当实时资金流接口不可用时，用 parquet index_hist 最新日涨跌幅构造资金流排名。
+    def _build_fund_flow_from_index_hist(self, indicator: str = "今日") -> Optional[pd.DataFrame]:
+        """当实时资金流接口不可用时，用 parquet index_hist 涨跌幅构造资金流排名。
 
         每日管线先更新 index_hist，因此回退数据与最新交易日一致；
         用涨跌幅代理主力净流入方向，至少保证资金流向地图的红绿条形有意义。
+        对 "5日"/"10日" 指标，取最近 N 个交易日累计涨跌幅作为代理。
         """
         try:
             sectors = self.sqlite_store.get_sectors(level=2)
             if sectors is None or sectors.empty:
                 return None
+            # 同花顺 K 线落盘列名为中文，先统一映射到英文列
+            col_map = {
+                "日期": "date",
+                "开盘": "open",
+                "收盘": "close",
+                "最高": "high",
+                "最低": "low",
+                "成交量": "volume",
+                "成交额": "amount",
+                "振幅": "amplitude",
+                "涨跌幅": "pct_change",
+                "涨跌额": "change",
+                "换手率": "turnover",
+            }
+            # 解析指标对应的交易日窗口
+            window = 1
+            if indicator.endswith("日"):
+                try:
+                    window = max(1, int(indicator.replace("日", "").strip()))
+                except ValueError:
+                    window = 1
             rows = []
             for _, row in sectors.iterrows():
                 code = row["code"]
@@ -107,18 +129,18 @@ class MoneyFlowIndicator:
                 if df is None or df.empty:
                     continue
                 df = df.copy()
-                df.columns = [str(c).lower() for c in df.columns]
-                if "date" not in df.columns:
+                df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
+                if "date" not in df.columns or "pct_change" not in df.columns:
                     continue
                 df["date"] = pd.to_datetime(df["date"])
                 df = df.sort_values("date")
-                last = df.iloc[-1]
-                pct = None
-                for col in ["pct_change", "涨跌幅"]:
-                    if col in last.index:
-                        pct = last[col]
-                        break
-                if pct is None or pd.isna(pct):
+                if len(df) < window:
+                    continue
+                # 取最近 window 个交易日累计涨跌幅（复利近似）
+                recent = df.tail(window)
+                pct = (1 + recent["pct_change"] / 100).prod() - 1
+                pct = pct * 100
+                if pd.isna(pct):
                     continue
                 rows.append({"code": code, "name": name, "pct": float(pct)})
             if not rows:
@@ -165,7 +187,7 @@ class MoneyFlowIndicator:
         # 数据源不可用或为空时，从已更新的 parquet index_hist 回退（主要用于同花顺实时接口被反爬的场景）
         if df is None or df.empty:
             logger.warning(f"资金流排名 {indicator} 数据源为空，尝试从 parquet index_hist 构造")
-            df = self._build_fund_flow_from_index_hist()
+            df = self._build_fund_flow_from_index_hist(indicator=indicator)
 
         if df is not None and not df.empty:
             self._save_fund_flow_cache(df, indicator)
@@ -336,10 +358,17 @@ class MoneyFlowIndicator:
             if flow_col and current_rank is not None:
                 # 判断是净流入还是净流出
                 total_industries = len(current_df)
-                if current_rank <= total_industries * 0.4 and trend == "改善":
+                # 趋势改善/恶化时按原逻辑；趋势稳定时直接按排名分位着色，
+                # 保证资金流向地图的红绿条形始终有意义。
+                if trend == "改善" and current_rank <= total_industries * 0.4:
                     return "正向"
-                elif current_rank > total_industries * 0.6 and trend == "恶化":
+                elif trend == "恶化" and current_rank > total_industries * 0.6:
                     return "反向"
+                elif trend == "稳定":
+                    if current_rank <= total_industries * 0.2:
+                        return "正向"
+                    elif current_rank > total_industries * 0.8:
+                        return "反向"
 
         return "中性"
 
