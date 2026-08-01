@@ -374,16 +374,31 @@ def is_trading_now() -> bool:
 REALTIME_INTERVAL = 20  # 秒
 
 
-@st.cache_data(ttl=10, show_spinner=False)
+@st.cache_data(ttl=20, show_spinner=False)
 def _fetch_realtime_quotes() -> list:
-    """拉取同花顺行业板块实时快照。失败返回 []。"""
+    """拉取盘中实时行情（腾讯指数/ETF 实时源）。失败回退同花顺静态兜底。
+
+    同花顺实时行业接口被反爬（运行时返回 None/401），故实时行情条改用
+    腾讯 qt.gtimg.cn（运行时直连可用），展示主要指数 + 行业 ETF 实时涨跌。
+    """
+    try:
+        from data.sources.tencent_source import TencentRealtimeSource
+        src = TencentRealtimeSource()
+        quotes = src.get_realtime_quotes()
+        if quotes:
+            return quotes
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"腾讯实时行情拉取失败: {e}")
+    # 回退：同花顺静态兜底（涨幅置 0）
     try:
         from data.sources import get_data_source
         src = get_data_source()
         if hasattr(src, "get_realtime_sector_quotes"):
-            return src.get_realtime_sector_quotes() or []
+            fb = src.get_realtime_sector_quotes() or []
+            if fb:
+                return fb
     except Exception as e:  # noqa: BLE001
-        logger.warning(f"实时行情拉取失败: {e}")
+        logger.warning(f"实时行情回退源也失败: {e}")
     return []
 
 
@@ -404,7 +419,7 @@ def render_realtime_ticker(live: bool):
 
     col_a, col_b = st.columns([4, 1])
     with col_a:
-        st.markdown("#### 📈 盘中实时行情 · 同花顺行业板块")
+        st.markdown("#### 📈 盘中实时行情 · 腾讯（指数 / 行业 ETF）")
     with col_b:
         if not quotes:
             st.caption("⚪ 实时源不可用")

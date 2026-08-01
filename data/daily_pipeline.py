@@ -298,13 +298,14 @@ def enrich_signal_performance():
 def enrich_fund_flow(target: str):
     """计算每个板块的资金流信号并落盘。
 
-    数据源为空时自动从 parquet index_hist 回退（同花顺实时接口常被反爬）。
-    单步失败不阻断其余板块；rec 始终包含全部字段，避免 executemany 绑定缺失。
+    真实主力资金流来自 AkShare 同花顺行业资金流（运行时可达，映射到 881xxx），
+    替代此前用涨跌幅代理的方案。AkShare 不可用时回退到 MoneyFlowIndicator 的
+    涨跌幅代理逻辑，保证离线可运行。
+
+    单步失败不阻断其余板块；rec 始终包含全部绑定字段，避免 executemany 绑定缺失。
     """
     try:
-        from indicators.money_flow import MoneyFlowIndicator
         parquet, sqlite = ParquetStore(), SQLiteStore()
-        mfi = MoneyFlowIndicator(parquet, sqlite, get_data_source())
 
         # 清除旧的资金流排名缓存，避免跨日/跨源时用上昨日或测试数据
         try:
@@ -314,15 +315,26 @@ def enrich_fund_flow(target: str):
         except Exception as e:
             logger.warning(f"清除资金流缓存失败: {e}")
 
-        # 先探测一次数据源可用性
-        probe = mfi.calc_sector_fund_flow_rank("今日")
-        if probe is None or probe.empty:
-            logger.info("资金流数据不可用（离线/接口异常），跳过落盘。")
-            return
+        # 1) 优先取 AkShare 真实同花顺行业资金流（映射到 881xxx）
+        real_ff: dict = {}
+        try:
+            from data.sources.akshare_fund_flow import fetch_ths_industry_fund_flow
+            real_ff = fetch_ths_industry_fund_flow()
+            logger.info(f"真实行业资金流获取成功: {len(real_ff)} 个板块")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"AkShare 真实资金流获取失败，回退涨跌幅代理: {e}")
+
+        # 2) 回退源（仅当 AkShare 失败时使用）
+        mfi = None
+        if not real_ff:
+            try:
+                from indicators.money_flow import MoneyFlowIndicator
+                mfi = MoneyFlowIndicator(parquet, sqlite, get_data_source())
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"资金流回退指标初始化失败: {e}")
 
         rows = []
         for code in SW_LEVEL2_MAP:
-            # 必须提供全部绑定字段，即使某板块计算失败
             rec = {
                 "sector_code": code,
                 "date": target,
@@ -330,20 +342,29 @@ def enrich_fund_flow(target: str):
                 "rank": None,
                 "rank_change": None,
                 "trend": None,
+                "main_net_inflow": None,
             }
-            try:
-                sig = mfi.calc_fund_flow_signal(code)
-                rec["signal"] = sig or "中性"
-                trend = mfi.calc_fund_flow_trend(code, days=5)
-                if trend:
-                    rec["rank"] = trend.get("current_rank")
-                    rec["rank_change"] = trend.get("rank_change")
-                    rec["trend"] = trend.get("trend")
-            except Exception as e:
-                logger.debug(f"板块 {code} 资金流计算失败: {e}")
+            rf = real_ff.get(code)
+            if rf:
+                # 真实资金流：主力净流入决定信号与排名
+                net = rf["net_inflow"]
+                rec["main_net_inflow"] = net
+                rec["signal"] = "正向" if net > 0 else ("反向" if net < 0 else "中性")
+            elif mfi is not None:
+                # 回退：涨跌幅代理
+                try:
+                    sig = mfi.calc_fund_flow_signal(code)
+                    rec["signal"] = sig or "中性"
+                    trend = mfi.calc_fund_flow_trend(code, days=5)
+                    if trend:
+                        rec["rank"] = trend.get("current_rank")
+                        rec["rank_change"] = trend.get("rank_change")
+                        rec["trend"] = trend.get("trend")
+                except Exception as e:
+                    logger.debug(f"板块 {code} 资金流回退计算失败: {e}")
             rows.append(rec)
         sqlite.upsert_sector_fund_flow(rows)
-        logger.info(f"资金流落盘完成: {len(rows)} 个板块")
+        logger.info(f"资金流落盘完成: {len(rows)} 个板块（真实 {len(real_ff)} 个）")
     except Exception as e:
         logger.error(f"资金流落盘失败: {e}")
         raise

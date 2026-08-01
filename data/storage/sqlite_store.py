@@ -195,6 +195,7 @@ CREATE TABLE IF NOT EXISTS sector_fund_flow (
     rank        INTEGER,                -- 主力净流入全市场排名（越小越强）
     rank_change INTEGER,                -- 相对前序窗口排名变化（正=改善）
     trend       TEXT,                   -- 资金流趋势：改善/恶化/稳定
+    main_net_inflow REAL,               -- 真实主力净流入（亿元，来自 AkShare 同花顺行业资金流）
     updated_at  TEXT DEFAULT (datetime('now', 'localtime')),
     PRIMARY KEY (sector_code, date)
 );
@@ -253,6 +254,13 @@ class SQLiteStore:
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_freshness_type_key "
                 "ON data_freshness(data_type, data_key)"
             )
+            # 迁移：sector_fund_flow 增加真实主力净流入列（旧库无此列）
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(sector_fund_flow)")]
+            if "main_net_inflow" not in cols:
+                conn.execute(
+                    "ALTER TABLE sector_fund_flow ADD COLUMN main_net_inflow REAL"
+                )
+                logger.info("迁移：sector_fund_flow 已增加 main_net_inflow 列")
             conn.commit()
             conn.close()
             logger.info(f"SQLite 数据库初始化完成: {self.db_path}")
@@ -522,9 +530,10 @@ class SQLiteStore:
         try:
             conn.executemany(
                 "INSERT OR REPLACE INTO sector_fund_flow "
-                "(sector_code, date, signal, rank, rank_change, trend, updated_at) "
+                "(sector_code, date, signal, rank, rank_change, trend, "
+                "main_net_inflow, updated_at) "
                 "VALUES (:sector_code, :date, :signal, :rank, :rank_change, :trend, "
-                "datetime('now', 'localtime'))",
+                ":main_net_inflow, datetime('now', 'localtime'))",
                 rows,
             )
             conn.commit()

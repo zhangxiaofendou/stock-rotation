@@ -148,13 +148,11 @@ def render():
 
 
 def _render_fund_flow_map():
-    """资金流向地图：展示当日行业资金流净流入/净流出排名前列板块（来自每日管线落盘）。"""
+    """资金流向地图：展示当日行业真实主力资金流净流入/净流出排名（来自每日管线落盘）。"""
     st.subheader("资金流向地图")
-    st.caption("行业资金流向地图（由板块当日涨跌幅代理主力净流入，非同花顺真实主力资金流）。")
-    st.info(
-        "⚠️ 口径说明：当前「资金流向」是用板块**当日涨跌幅**代理的**主力净流入排名**，"
-        "并非同花顺真实的行业主力资金流。对「价涨资退 / 价跌资进」的背离板块，此图会与真实资金方向相反，仅供参考。",
-        icon="⚠️",
+    st.caption(
+        "行业真实主力资金流（同花顺行业，AkShare 数据源；单位：亿元）。"
+        "🔴 红 = 净流入（资金涌入），🟢 绿 = 净流出（资金撤离）。"
     )
 
     sqlite = SQLiteStore()
@@ -172,47 +170,47 @@ def _render_fund_flow_map():
         st.warning(f"资金流表存在（最新日期 **{latest}**），但当日无记录。请重新运行手动刷新。")
         return
 
+    if "main_net_inflow" not in df.columns:
+        df["main_net_inflow"] = None
     df = df.copy()
     df["name"] = df["sector_code"].map(lambda c: get_sector_name(c))
-    valid = df.dropna(subset=["rank"])
+    valid = df.dropna(subset=["main_net_inflow"])
     if valid.empty:
         st.warning(
-            f"资金流数据无有效排名（{latest}）。\n\n"
-            f"当日共 **{len(df)}** 条记录，但 `rank` 字段全部为空，"
-            "说明资金流回退计算未生成排名。请重新运行手动刷新，并在侧栏查看运行保障日志。"
+            f"当日资金流无真实净流入数据（{latest}）。可能 AkShare 接口不可用且回退失败。"
+            "请重新运行手动刷新，或在侧栏查看运行保障日志。"
         )
         return
-    df = valid.sort_values("rank")
 
-    top_in = df.head(10)
-    top_out = df.tail(10).sort_values("rank", ascending=False)
-    sig_color = {"正向": "#2E7D32", "反向": "#C62828", "中性": "#9E9E9E"}
+    df = valid.sort_values("main_net_inflow", ascending=False)
+    top_in = df.head(10)                              # 净流入最多
+    top_out = df.tail(10).sort_values("main_net_inflow")  # 净流出最多（升序，最弱在上）
 
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown(f"**净流入前列（{latest}）**")
+        st.markdown(f"**净流入前列（{latest}，亿元）**")
         fig = go.Figure()
         fig.add_trace(go.Bar(
-            x=top_in["rank"], y=top_in["name"], orientation="h",
-            marker_color=top_in["signal"].map(lambda s: sig_color.get(s, "#9E9E9E")),
-            text=top_in["signal"], textposition="auto",
+            x=top_in["main_net_inflow"], y=top_in["name"], orientation="h",
+            marker_color="#d4380d",
+            text=top_in["main_net_inflow"].map(lambda v: f"{v:+.1f}亿"), textposition="auto",
         ))
         fig.update_layout(
             height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
-            xaxis_title="净流入排名（越小越强）", yaxis={"autorange": "reversed"},
+            xaxis_title="主力净流入（亿元）", yaxis={"autorange": "reversed"},
         )
         st.plotly_chart(fig, width="stretch")
     with col2:
-        st.markdown("**净流出前列**")
+        st.markdown(f"**净流出前列（{latest}，亿元）**")
         fig2 = go.Figure()
         fig2.add_trace(go.Bar(
-            x=top_out["rank"], y=top_out["name"], orientation="h",
-            marker_color=top_out["signal"].map(lambda s: sig_color.get(s, "#9E9E9E")),
-            text=top_out["signal"], textposition="auto",
+            x=top_out["main_net_inflow"], y=top_out["name"], orientation="h",
+            marker_color="#389e0d",
+            text=top_out["main_net_inflow"].map(lambda v: f"{v:+.1f}亿"), textposition="auto",
         ))
         fig2.update_layout(
             height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
-            xaxis_title="净流入排名（越大越弱）", yaxis={"autorange": "reversed"},
+            xaxis_title="主力净流入（亿元）", yaxis={"autorange": "reversed"},
         )
         st.plotly_chart(fig2, width="stretch")
 
