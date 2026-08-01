@@ -10,6 +10,7 @@ from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from portfolio.holdings import PortfolioHoldings
 from portfolio.advisor import PortfolioAdvisor
+from dashboard.components.data_source_badge import render_src_badge
 
 
 @st.cache_resource
@@ -94,6 +95,7 @@ def _render_positions(service: PortfolioHoldings):
     positions = service.positions()
 
     st.subheader("我的持仓")
+    render_src_badge("derived")
     st.caption("当前为成本口径账本：市值、浮盈亏和组合建议将在行情与风险模块接入后补齐。")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("持仓标的", f"{summary['position_count']} 只")
@@ -128,6 +130,7 @@ def _render_positions(service: PortfolioHoldings):
 def _render_pending_items(service: PortfolioHoldings):
     """展示可追溯的持仓复核事项，避免把通用信号直接转成自动交易。"""
     st.subheader("待处理事项")
+    render_src_badge("derived")
     positions = service.positions()
     if positions.empty:
         st.info("录入持仓后，这里将结合九宫格状态、止损条件、行业集中度和市场风险生成待处理事项。")
@@ -164,6 +167,7 @@ def _render_pending_items(service: PortfolioHoldings):
 
 def _render_transactions(service: PortfolioHoldings):
     st.subheader("操作日志")
+    render_src_badge("derived")
     transactions = service.transactions()
     if transactions.empty:
         st.caption("暂无实际操作记录。")

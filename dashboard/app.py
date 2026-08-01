@@ -22,6 +22,7 @@ import pandas as pd
 from config.settings import LOG_DIR
 from data.storage.sqlite_store import SQLiteStore
 from config.logger import get_logger
+from dashboard.components.data_source_badge import render_legend, render_src_badge
 
 logger = get_logger(__name__)
 
@@ -322,6 +323,7 @@ def _probe_data_source() -> dict:
 def render_data_source_health():
     """侧栏数据源诊断：一眼看清同花顺各接口是否可达、行业数据为何滞后。"""
     with st.sidebar.expander("🔧 数据源诊断（同花顺滞后排查）", expanded=True):
+        render_src_badge("ths")
         try:
             p = _probe_data_source()
         except Exception as e:  # noqa: BLE001
@@ -420,6 +422,7 @@ def render_realtime_ticker(live: bool):
     col_a, col_b = st.columns([4, 1])
     with col_a:
         st.markdown("#### 📈 盘中实时行情 · 腾讯（指数 / 行业 ETF）")
+        render_src_badge("tencent")
     with col_b:
         if not quotes:
             st.caption("⚪ 实时源不可用")
@@ -474,6 +477,7 @@ def main():
 
         # 数据状态与手动刷新
         st.markdown("### 📡 数据状态")
+        render_src_badge("derived")
 
         source_date = get_latest_source_date()
         local_date, summary_df = get_local_data_status()
@@ -526,6 +530,7 @@ def main():
 
         # 运行保障（可观测性）：最近运行 / 下次运行 / 失败原因 / 双源校验
         _render_run_observability()
+        render_src_badge("derived")
 
         st.markdown("---")
 
@@ -536,6 +541,10 @@ def main():
             ["市场温度计", "板块轮动监控", "持仓管理", "信号绩效", "策略研究", "盘后报告"],
             label="导航菜单",
         )
+
+        st.markdown("---")
+        # 数据来源图例：解码界面各数据块的来源徽标
+        render_legend()
 
         st.markdown("---")
         st.markdown("### 图例说明")

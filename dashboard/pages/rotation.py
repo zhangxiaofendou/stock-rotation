@@ -35,6 +35,7 @@ from dashboard.components.nav_state import persistent_tabs
 from signal_tracker.performance import get_sector_signal_summary
 from ai.consensus import compute_sector_consensus
 from model.confirmation import arbitrate_sector
+from dashboard.components.data_source_badge import render_src_badge
 
 # 状态颜色映射
 STATE_BG_COLORS = {
@@ -109,6 +110,7 @@ def load_mirror_confirmation(sector_code: str, sector_state: str):
 def _render_confirmation_risk_panel(selected_code: str, sector_state: str, score_row: pd.Series | None):
     """展示不参与主评分的辅助确认与风险信息。"""
     st.subheader("确认与风险因子")
+    render_src_badge("em", "derived")
     st.caption("以下因子用于解释和风险提示，不改变九宫格状态、综合评分或原有操作建议。")
 
     crowding_score = score_row.get("crowding_score") if score_row is not None else None
@@ -214,6 +216,7 @@ def _render_arbitration_banner(selected_code: str, sector_state: str):
     """展示九宫格 × 资金流 × 研报 三路信号仲裁结果（仅确认/降级/否决）。"""
     st.markdown("---")
     st.markdown("##### ⚖️ 信号仲裁（九宫格 × 资金流 × 研报）")
+    render_src_badge("derived")
     st.caption("三路信号交叉验证：仅做确认/降级/否决，不改变九宫格状态或综合评分。")
 
     try:
@@ -260,6 +263,7 @@ def _render_research_consensus_card(sector_code: str):
     """在「确认与风险因子」中展示研报/新闻共识（辅助确认，不改变主信号）。"""
     st.markdown("---")
     st.markdown("##### 🤖 研报 / 新闻共识")
+    render_src_badge("derived")
     st.caption("纯规则计算（PRD §7.4），仅作辅助确认；不改变九宫格状态、综合评分或操作建议。")
 
     try:
@@ -329,6 +333,7 @@ def _render_score_breakdown(score_row: pd.Series):
                    mom_cross_score / rs_position_score / rs_momentum_score）
     """
     st.subheader("综合评分明细")
+    render_src_badge("derived")
     st.caption(SCORE_WEIGHT_NOTE)
 
     score = score_row.get("score")
@@ -827,6 +832,7 @@ def render():
 
         if filter_mode.startswith("🎯"):
             st.markdown("#### 九宫格板块分布热力图")
+            render_src_badge("ths", "derived")
             st.caption("横轴：RS动量方向 | 纵轴：价格趋势方向　·　点击方块按状态筛选板块")
             _render_heatmap_clickable(state_df)
             selected_state = st.session_state.get("rotation_hm_state")
@@ -861,6 +867,7 @@ def render():
 
         st.markdown("---")
         st.subheader("🔍 个股下钻")
+        render_src_badge("ths", "em")
         st.caption("已关联当前筛选行业，可直接查看成分股排名、龙头识别、双重漏斗与个股详情。")
         render_stock_drill(
             selected_sector_code=selected_code,
@@ -942,6 +949,7 @@ def _render_sector_signal_summary(sector_code: str):
         # 当前状态卡片
         # ================================================================
         st.subheader("当前状态")
+        render_src_badge("derived")
 
         sector_info = state_df[state_df["sector_code"] == selected_code]
         if not sector_info.empty:
@@ -993,24 +1001,28 @@ def _render_sector_signal_summary(sector_code: str):
         # K线图
         # ================================================================
         st.subheader("K线图")
+        render_src_badge("ths")
         _render_kline_chart(kline_df, sector_name)
 
         # ================================================================
         # RS走势图
         # ================================================================
         st.subheader("RS走势")
+        render_src_badge("derived")
         _render_rs_chart(rs_df)
 
         # ================================================================
         # RS动量图
         # ================================================================
         st.subheader("RS动量")
+        render_src_badge("derived")
         _render_rs_momentum_chart(rs_df)
 
         # ================================================================
         # 状态历史
         # ================================================================
         st.subheader("状态历史")
+        render_src_badge("derived")
         _render_state_history(state_series)
 
         # 状态序列表格
@@ -1054,6 +1066,7 @@ def _render_sector_signal_summary(sector_code: str):
         """在趋势对照表底部展示选中板块的 4 维度 + 综合分详细计算过程（与表格选中行联动）。"""
         st.divider()
         st.subheader(f"🧮 {sector_name}（{sector_code}）评分详细计算过程")
+        render_src_badge("derived")
         st.caption(
             "下方每一步都列出真实数值与计算公式，可与上方表格的「综合评分 / 4 维度」各列逐一核对。"
         )

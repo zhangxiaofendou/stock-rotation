@@ -20,6 +20,7 @@ from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from model.circuit_breaker import CircuitBreaker
 from config.sector_map import SECTOR_GROUPS, get_sector_name
+from dashboard.components.data_source_badge import render_src_badge
 
 # 状态颜色
 STATE_COLORS = {
@@ -150,6 +151,7 @@ def render():
 def _render_fund_flow_map():
     """资金流向地图：展示当日行业真实主力资金流净流入/净流出排名（来自每日管线落盘）。"""
     st.subheader("资金流向地图")
+    render_src_badge("em")
     st.caption(
         "行业真实主力资金流（同花顺行业，AkShare 数据源；单位：亿元）。"
         "🔴 红 = 净流入（资金涌入），🟢 绿 = 净流出（资金撤离）。"
@@ -228,6 +230,7 @@ def _render_market_overview():
     # 第一行：市场环境状态 + 涨跌统计
     # ================================================================
     st.subheader("市场环境")
+    render_src_badge("ths")
 
     col1, col2, col3, col4 = st.columns(4)
 
@@ -262,6 +265,7 @@ def _render_market_overview():
     # 涨跌统计条（当日涨跌幅口径）
     # ================================================================
     st.subheader("涨跌分布")
+    render_src_badge("ths")
     st.caption(f"基于各板块 {state_df['date'].iloc[0] if state_df is not None else ''} 当日涨跌幅统计（>+0.01% 为涨，<-0.01% 为跌）")
     total = up_count + down_count + flat_count
     if total > 0:
@@ -294,6 +298,7 @@ def _render_market_overview():
     # 九宫格状态分布
     # ================================================================
     st.subheader("九宫格状态分布")
+    render_src_badge("derived")
 
     if state_dist:
         # 准备分布数据
@@ -342,6 +347,7 @@ def _render_market_overview():
     # 风格雷达：板块组强弱统计
     # ================================================================
     st.subheader("板块组强弱统计")
+    render_src_badge("derived")
 
     if group_stats:
         # 准备雷达图数据
@@ -419,6 +425,7 @@ def _render_market_overview():
     # 板块组之间的资金迁移路径（最底部）
     # ================================================================
     st.subheader("板块组之间的资金迁移路径")
+    render_src_badge("derived")
     st.caption("按各板块组的净资金流推导组间迁移：红=净流出板块组(弱势)，绿=净流入板块组(强势)")
 
     try:

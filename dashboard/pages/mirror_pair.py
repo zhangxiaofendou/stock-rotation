@@ -18,6 +18,7 @@ from model.state_machine import StateMachine
 from model.mirror_pair import MirrorPair
 from config.sector_map import SECTOR_GROUPS, get_sector_name
 from dashboard.components.state_card import STATE_EMOJI
+from dashboard.components.data_source_badge import render_src_badge
 
 
 @st.cache_resource
@@ -347,6 +348,7 @@ def render(show_header: bool = True):
 
     # 统计概览
     st.subheader("概览")
+    render_src_badge("derived")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -364,6 +366,7 @@ def render(show_header: bool = True):
     # 镜像对列表
     # ================================================================
     st.subheader("镜像对列表")
+    render_src_badge("derived")
     _render_mirror_table(mirror_pairs)
 
     # ================================================================
@@ -374,6 +377,7 @@ def render(show_header: bool = True):
         unsafe_allow_html=True,
     )
     st.caption("展示资金从弱势板块(④/⑦)流向强势板块(⑥/③)的路径")
+    render_src_badge("derived")
     _render_sankey(mirror_pairs)
 
 

@@ -14,6 +14,7 @@ from signal_tracker.performance import (
     failure_alerts,
     path_analysis,
 )
+from dashboard.components.data_source_badge import render_src_badge
 
 
 @st.cache_data(ttl=3600)
@@ -50,6 +51,7 @@ def _render_overview(perf: pd.DataFrame):
             )
 
     st.subheader("按信号类型（进入状态）")
+    render_src_badge("derived")
     to_tbl = ov["to_state"].copy()
     to_tbl["胜率"] = to_tbl["win_rate"].map(_fmt_pct)
     to_tbl["平均20日收益"] = to_tbl["avg_return_t20"].map(_fmt_pct)
@@ -65,6 +67,7 @@ def _render_overview(perf: pd.DataFrame):
     )
 
     st.subheader("按信号源（离开状态）")
+    render_src_badge("derived")
     from_tbl = ov["from_state"].copy()
     from_tbl["胜率"] = from_tbl["win_rate"].map(_fmt_pct)
     from_tbl["平均20日收益"] = from_tbl["avg_return_t20"].map(_fmt_pct)
@@ -80,6 +83,7 @@ def _render_overview(perf: pd.DataFrame):
 
 def _render_paths(perf: pd.DataFrame):
     st.subheader("关键路径后续表现")
+    render_src_badge("derived")
     pa = path_analysis(perf_df=perf)
     if pa.empty:
         st.info("暂无路径数据。")
@@ -104,6 +108,7 @@ def _render_paths(perf: pd.DataFrame):
 
 def _render_detail(perf: pd.DataFrame):
     st.subheader("信号明细")
+    render_src_badge("derived")
     col1, col2, col3 = st.columns(3)
     with col1:
         sector = st.text_input("板块代码/名称筛选", placeholder="如 801080 或 半导体")
@@ -148,6 +153,7 @@ def _render_detail(perf: pd.DataFrame):
 
 def _render_alerts(perf: pd.DataFrame):
     st.subheader("失效预警")
+    render_src_badge("derived")
     c1, c2, c3 = st.columns(3)
     with c1:
         window = st.selectbox("统计窗口", [30, 60, 90, 180, 0],
@@ -175,6 +181,7 @@ def _render_alerts(perf: pd.DataFrame):
         )
 
     st.subheader("全部信号类型表现（当前窗口）")
+    render_src_badge("derived")
     allt = res["all"].copy()
     allt["胜率"] = allt["win_rate"].map(_fmt_pct)
     allt["平均20日收益"] = allt["avg_return_t20"].map(_fmt_pct)

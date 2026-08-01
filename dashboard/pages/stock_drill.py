@@ -34,6 +34,7 @@ from dashboard.components.drill_pickers import (
     render_sector_picker as _render_sector_picker,
     render_state_grid_visual as _render_state_grid_visual,
 )
+from dashboard.components.data_source_badge import render_src_badge
 
 logger = get_logger(__name__)
 
@@ -604,6 +605,7 @@ def _render_component_list(merged_df: pd.DataFrame, sector_name: str, has_spot_d
         return
 
     st.subheader(f"📋 {sector_name} 成分股排名 ({len(merged_df)}只)")
+    render_src_badge("ths", "em")
 
     if not has_spot_data:
         st.warning("⚠️ 实时行情数据暂时不可用，仅展示成分股基本信息。涨跌幅、PE、PB 等指标无法显示。")
@@ -712,6 +714,7 @@ def _render_leaders(merged_df: pd.DataFrame, sector_name: str):
         return
 
     st.subheader(f"🏆 {sector_name} 龙头识别")
+    render_src_badge("ths", "em")
 
     # 按涨跌幅取 Top 5
     top5 = merged_df.head(5).copy()
@@ -851,6 +854,7 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_dat
         return
 
     st.subheader(f"🎯 双重漏斗选股 — {sector_name}")
+    render_src_badge("ths", "em")
 
     if not has_spot_data:
         st.warning("⚠️ 实时行情数据暂不可用，资金面和基本面得分均为默认值 50，筛选结果仅供参考。请等待行情数据加载完成后刷新。")
@@ -970,6 +974,7 @@ def _render_stock_funnel(merged_df: pd.DataFrame, sector_name: str, has_spot_dat
     # ============================================================
     st.markdown("---")
     st.markdown(f"### ⭐ 最终标的池（{len(final_pool)} 只）")
+    render_src_badge("ths", "em")
 
     if final_pool.empty:
         st.info("当前条件下无结果，请调整筛选参数")
@@ -1240,6 +1245,7 @@ def _render_stock_detail_popup(code: str, name: str):
             fin = load_financial_summary(code)
             if fin:
                 st.markdown("#### 财务摘要")
+                render_src_badge("em")
                 col1, col2 = st.columns(2)
                 with col1:
                     for key in ["股票简称", "营业收入-同比增长", "净利润-同比增长",
@@ -1469,6 +1475,7 @@ def _render_same_state_sectors(current_state: str, current_code: str):
 def _render_state_tab(sector_code: str, sector_name: str):
     """Tab 5 主入口：九宫格状态关联"""
     st.subheader(f"🧭 {sector_name} 九宫格状态关联")
+    render_src_badge("derived")
 
     # 获取当前板块状态
     all_states = load_all_sector_states()
@@ -1511,6 +1518,7 @@ def render(selected_sector_code=None, sector_label="", embedded=False):
     """
     if not embedded:
         st.subheader("🔍 个股下钻")
+        render_src_badge("ths", "em")
         st.caption("三级联动：九宫格状态 / 状态切换 → 行业 → 成分股详情")
 
         # ================================================================
@@ -1595,6 +1603,7 @@ def render(selected_sector_code=None, sector_label="", embedded=False):
 
     with tab4:
         st.subheader("📈 个股详情查询")
+        render_src_badge("ths", "em")
         if not merged_df.empty and "stock_code" in merged_df.columns and "stock_name" in merged_df.columns:
             stock_options = {"": "请选择个股"}
             for _, row in merged_df.iterrows():
