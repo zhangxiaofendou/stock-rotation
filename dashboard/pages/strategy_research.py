@@ -99,7 +99,7 @@ def _params_for(strategy_name) -> dict:
 # ============================================================
 def _render_backtest():
     st.subheader("策略回测")
-    render_src_badge("ths", "derived")
+    render_src_badge("ths", "derived", base=["ths_kline", "em_flow"])
     st.caption("事件驱动、T+1 开盘撮合、双边成本；与实时看板/真实持仓隔离。回测目的是证伪与理解策略性格，"
                "回测好看 ≠ 实盘能赚。")
 
@@ -143,7 +143,7 @@ def _render_backtest():
 
 def _render_metrics(m: dict, strategy_name: str):
     st.subheader("核心指标")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     bench = m.get("benchmark") or {}
     cols = st.columns(4)
     cols[0].metric("总收益", _fmt_pct(m.get("total_ret")), _fmt_pct(bench.get("excess_total_ret", 0), 1))
@@ -186,7 +186,7 @@ def _render_annual(m: dict):
     if not annual:
         return
     st.subheader("分年度收益")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     df = pd.DataFrame([{"年度": k, "收益": v} for k, v in annual.items()])
     fig = go.Figure()
     colors = [RED if v >= 0 else GREEN for v in df["收益"]]
@@ -198,7 +198,7 @@ def _render_annual(m: dict):
 
 def _render_contributions(result):
     st.subheader("板块收益贡献（Top/Bottom）")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     contrib = result.contributions.copy()
     contrib["板块"] = contrib["code"].map(lambda c: f"{get_sector_name(c)}")
     contrib = contrib.sort_values("contribution", ascending=False)
@@ -215,7 +215,7 @@ def _render_trades(result):
     if not result.trades:
         return
     st.subheader("交易明细")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     rows = []
     for t in result.trades:
         rows.append({
@@ -229,7 +229,7 @@ def _render_trades(result):
 
 def _render_save_experiment(strategy_name: str, params: dict, m: dict, start: str, end: str):
     st.subheader("保存实验记录")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["user"])
     note = st.text_input("实验备注（可选）", placeholder="如：参数鲁棒性测试 / 熊市表现")
     if st.button("💾 保存本次实验"):
         exp_id = bt_exp.save_experiment(strategy_name, params, m, start, end, note)
@@ -241,7 +241,7 @@ def _render_save_experiment(strategy_name: str, params: dict, m: dict, start: st
 # ============================================================
 def _render_replay():
     st.subheader("历史信号回放")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["history"])
     st.caption("选择任一历史日期，只读展示当天市场全貌（九宫格状态分布 / 镜像对 / 动作建议）。")
     rep_date = st.date_input("回放日期", value=pd.to_datetime(DEFAULT_END))
     rep_date_str = rep_date.strftime("%Y-%m-%d")
@@ -263,7 +263,7 @@ def _render_replay():
     cols[3].metric("减/清仓", s["action_counts"].get("减仓", 0) + s["action_counts"].get("清仓", 0))
 
     st.subheader("九宫格状态分布")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline"])
     dist = data["distribution"]
     if dist:
         df = pd.DataFrame([{"状态": k, "数量": v} for k, v in dist.items()])
@@ -280,7 +280,7 @@ def _render_replay():
         st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("镜像对（关联组内④↔⑥ / ③↔⑦）")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     if data["mirror_pairs"]:
         mp_rows = []
         for p in data["mirror_pairs"]:
@@ -300,7 +300,7 @@ def _render_replay():
 # ============================================================
 def _render_experiments():
     st.subheader("实验记录")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["user"])
     st.caption("每次回测的参数快照 + 核心指标 + git hash，用于策略对比与参数调优追溯。")
     recs = bt_exp.list_experiments()
     if not recs:

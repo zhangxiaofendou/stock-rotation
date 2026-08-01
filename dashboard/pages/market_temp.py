@@ -298,7 +298,7 @@ def _render_market_overview():
     # 九宫格状态分布
     # ================================================================
     st.subheader("九宫格状态分布")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline"])
 
     if state_dist:
         # 准备分布数据
@@ -347,7 +347,7 @@ def _render_market_overview():
     # 风格雷达：板块组强弱统计
     # ================================================================
     st.subheader("板块组强弱统计")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline"])
 
     if group_stats:
         # 准备雷达图数据
@@ -425,7 +425,7 @@ def _render_market_overview():
     # 板块组之间的资金迁移路径（最底部）
     # ================================================================
     st.subheader("板块组之间的资金迁移路径")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     st.caption("按各板块组的净资金流推导组间迁移：红=净流出板块组(弱势)，绿=净流入板块组(强势)")
 
     try:

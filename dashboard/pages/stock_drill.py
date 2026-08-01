@@ -1475,7 +1475,7 @@ def _render_same_state_sectors(current_state: str, current_code: str):
 def _render_state_tab(sector_code: str, sector_name: str):
     """Tab 5 主入口：九宫格状态关联"""
     st.subheader(f"🧭 {sector_name} 九宫格状态关联")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
 
     # 获取当前板块状态
     all_states = load_all_sector_states()

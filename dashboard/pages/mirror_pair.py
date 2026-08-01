@@ -348,7 +348,7 @@ def render(show_header: bool = True):
 
     # 统计概览
     st.subheader("概览")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -366,7 +366,7 @@ def render(show_header: bool = True):
     # 镜像对列表
     # ================================================================
     st.subheader("镜像对列表")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     _render_mirror_table(mirror_pairs)
 
     # ================================================================
@@ -377,7 +377,7 @@ def render(show_header: bool = True):
         unsafe_allow_html=True,
     )
     st.caption("展示资金从弱势板块(④/⑦)流向强势板块(⑥/③)的路径")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow"])
     _render_sankey(mirror_pairs)
 
 

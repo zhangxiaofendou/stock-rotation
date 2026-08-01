@@ -10,6 +10,13 @@
   - tencent 腾讯(gtimg)：盘中实时行情条（指数/ETF 实时快照）
   - derived 本地计算/AI 合成：RS、趋势、九宫格状态机、分化度、信号绩效、
             综合评分、回测、持仓、研报共识样本
+
+「本地计算」的底数（底层原始数据）映射：
+  - ths_kline 同花顺K线：行业/个股价格、涨跌、RS相对强弱、价格趋势、九宫格状态机、分化度
+  - em_flow   东方财富资金流：真实行业主力净流入（资金流信号、综合评分的资金维度）
+  - seed      研报共识样本：本地种子样本（ai/seed_data.py），非实时外部源
+  - user      用户录入：持仓、操作日志（用户手动维护）
+  - history   本地历史落盘：信号状态切换历史（源自九宫格状态机落库）
 """
 
 from typing import Iterable
@@ -44,6 +51,15 @@ SOURCE_META = {
     },
 }
 
+# 「本地计算」的底数（底层原始数据来源）元数据
+BASE_META = {
+    "ths_kline": {"label": "同花顺K线", "color": "#1677ff", "desc": "行业/个股价格、涨跌、RS相对强弱、价格趋势、九宫格状态机、分化度"},
+    "em_flow": {"label": "东方财富资金流", "color": "#722ed1", "desc": "真实行业主力净流入（资金流信号、综合评分的资金维度）"},
+    "seed": {"label": "研报共识样本", "color": "#8c8c8c", "desc": "本地种子样本（ai/seed_data.py），非实时外部源"},
+    "user": {"label": "用户录入", "color": "#8c8c8c", "desc": "持仓、操作日志由用户手动维护"},
+    "history": {"label": "本地历史落盘", "color": "#8c8c8c", "desc": "信号状态切换历史（源自九宫格状态机落库）"},
+}
+
 
 def _hex_to_rgba(hex_color: str, alpha: float = 0.12) -> str:
     """把 #RRGGBB 转成 rgba(...) 用作浅色底。"""
@@ -54,10 +70,40 @@ def _hex_to_rgba(hex_color: str, alpha: float = 0.12) -> str:
     return "rgba(0,0,0,0.06)"
 
 
-def src_badge_html(*keys: str, prefix: str = "🏷 数据来源") -> str:
+def _base_chips_html(base) -> str:
+    """生成「底数」副标签的 HTML（仅对本地计算有意义）。"""
+    if base is None:
+        return ""
+    if isinstance(base, str):
+        bases = [base]
+    else:
+        bases = list(base)
+    valid = [b for b in bases if b in BASE_META]
+    if not valid:
+        return ""
+    chips = []
+    for b in valid:
+        m = BASE_META[b]
+        bg = _hex_to_rgba(m["color"], 0.10)
+        chips.append(
+            f'<span title="{m["desc"]}" style="display:inline-block;margin:1px 4px 1px 0;'
+            f'padding:0 7px;border-radius:8px;font-size:10px;font-weight:600;'
+            f'background:{bg};color:{m["color"]};border:1px dashed {m["color"]};'
+            f'white-space:nowrap;">{m["label"]}</span>'
+        )
+    joined = "".join(chips)
+    return (
+        f'<span style="font-size:10px;color:#999;margin-right:3px;">底数</span>'
+        f'{joined}'
+    )
+
+
+def src_badge_html(*keys: str, prefix: str = "🏷 数据来源", base=None) -> str:
     """生成一组来源徽标的 HTML 字符串（供 unsafe_allow_html 渲染）。
 
     keys 可为 "ths" / "em" / "tencent" / "derived" 的任意组合。
+    base 仅对含 "derived" 的调用有效，可为单个 BASE_META key 或 key 列表，
+    用于标注「本地计算」的底层原始数据来源。
     """
     valid = [k for k in keys if k in SOURCE_META]
     if not valid:
@@ -73,16 +119,20 @@ def src_badge_html(*keys: str, prefix: str = "🏷 数据来源") -> str:
             f'white-space:nowrap;">{m["short"]}·{m["label"]}</span>'
         )
     joined = "".join(chips)
+    base_html = _base_chips_html(base) if "derived" in valid else ""
     return (
         f'<div style="margin:2px 0 6px;line-height:1.6;">'
         f'<span style="font-size:11px;color:#888;margin-right:4px;">{prefix}：</span>'
-        f'{joined}</div>'
+        f'{joined}{base_html}</div>'
     )
 
 
-def render_src_badge(*keys: str, prefix: str = "🏷 数据来源"):
-    """直接在 Streamlit 渲染来源徽标（在 section header 之后调用）。"""
-    html = src_badge_html(*keys, prefix=prefix)
+def render_src_badge(*keys: str, prefix: str = "🏷 数据来源", base=None):
+    """直接在 Streamlit 渲染来源徽标（在 section header 之后调用）。
+
+    base 仅对含 "derived" 的调用有效，标注本地计算的底层原始数据来源。
+    """
+    html = src_badge_html(*keys, prefix=prefix, base=base)
     if html:
         st.markdown(html, unsafe_allow_html=True)
 
@@ -101,7 +151,19 @@ def render_legend():
             )
             st.caption(m["desc"])
         st.markdown("---")
-        st.caption("界面中每个数据块标题下方标注其来源徽标；悬停徽标可看详细说明。")
+        st.markdown("**本地计算的底数（底层原始数据）**")
+        for b, m in BASE_META.items():
+            bg = _hex_to_rgba(m["color"], 0.10)
+            st.markdown(
+                f'<span style="display:inline-block;margin:1px 4px 1px 0;padding:0 7px;'
+                f'border-radius:8px;font-size:10px;font-weight:600;background:{bg};'
+                f'color:{m["color"]};border:1px dashed {m["color"]};'
+                f'white-space:nowrap;">{m["label"]}</span>',
+                unsafe_allow_html=True,
+            )
+            st.caption(m["desc"])
+        st.markdown("---")
+        st.caption("界面中每个数据块标题下方标注其来源徽标；标「本地计算」者会同时标注其底数（虚线框）。")
 
 
 # 便捷别名，便于页面调用

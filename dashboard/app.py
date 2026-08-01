@@ -477,7 +477,7 @@ def main():
 
         # 数据状态与手动刷新
         st.markdown("### 📡 数据状态")
-        render_src_badge("derived")
+        render_src_badge("derived", base=["ths_kline", "em_flow"])
 
         source_date = get_latest_source_date()
         local_date, summary_df = get_local_data_status()
@@ -530,7 +530,7 @@ def main():
 
         # 运行保障（可观测性）：最近运行 / 下次运行 / 失败原因 / 双源校验
         _render_run_observability()
-        render_src_badge("derived")
+        render_src_badge("derived", base=["history"])
 
         st.markdown("---")
 

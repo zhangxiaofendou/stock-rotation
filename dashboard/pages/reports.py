@@ -29,7 +29,7 @@ TAB_NOTIFY = "通知设置"
 
 def _render_today():
     st.subheader("今日盘后报告")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["ths_kline", "em_flow", "seed"])
     st.caption("报告由每日管线在收盘后自动生成；此处可查看或按需手动生成。仅汇总已计算的"
                "市场、持仓、绩效与风险结论，不重新计算指标。")
 
@@ -82,7 +82,7 @@ def _render_today():
 
 def _render_archive():
     st.subheader("历史归档")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["history"])
     reports = list_reports()
     if not reports:
         st.info("暂无归档报告。每日管线运行后会自动生成；也可在「今日报告」页手动生成。")
@@ -109,7 +109,7 @@ def _render_archive():
 
 def _render_notify():
     st.subheader("通知设置")
-    render_src_badge("derived")
+    render_src_badge("derived", base=["user"])
     st.caption("通知只分发摘要与链接，不计算指标。渠道凭据独立存放于 "
                "`config/notification.json`（不进版本控制、不在此页面编辑）。")
 
