@@ -41,12 +41,50 @@ _CN_COLS = {
 }
 
 _HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Referer": "https://q.10jqka.com.cn/",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
 }
 
 _THS_KLINE_HOST = "https://d.10jqka.com.cn"
 _THS_LIST_HOST = "https://q.10jqka.com.cn"
+
+# 同花顺行业板块静态兜底映射（90 个，代码稳定）。
+# 当实时行业清单接口因反爬/网络抖动返回空时，用此映射保证板块宇宙不空、
+# 刷新循环仍有板块可更新。名称可能与实时略有出入，但 K 线代码有效。
+_THS_FALLBACK_MAP: dict[str, str] = {
+    "881271": "IT服务", "881272": "软件开发", "881171": "自动化设备",
+    "881164": "文化传媒", "881274": "影视院线", "881130": "计算机设备",
+    "881275": "游戏", "881162": "通信服务", "881270": "元件",
+    "881121": "半导体", "881277": "电机", "881169": "贵金属",
+    "881129": "通信设备", "881178": "教育", "881284": "环保设备",
+    "881117": "通用设备", "881124": "消费电子", "881172": "电子化学品",
+    "881276": "军工电子", "881282": "其他电源设备", "881123": "其他电子",
+    "881122": "光学光电子", "881179": "其他社会服务", "881265": "塑料制品",
+    "881175": "医疗服务", "881116": "建筑装饰", "881177": "互联网电商",
+    "881170": "小金属", "881126": "汽车零部件", "881118": "专用设备",
+    "881167": "非金属材料", "881138": "包装印刷", "881131": "白色家电",
+    "881114": "金属新材料", "881144": "医疗器械", "881181": "环境治理",
+    "881266": "橡胶制品", "881142": "生物制品", "881137": "造纸",
+    "881132": "黑色家电", "881278": "电网设备", "881139": "家居用品",
+    "881133": "饮料制造", "881168": "工业金属", "881166": "军工装备",
+    "881136": "服装家纺", "881165": "综合", "881101": "种植业与林业",
+    "881269": "轨交设备", "881173": "小家电", "881115": "建筑材料",
+    "881279": "光伏设备", "881146": "燃气", "881141": "中药",
+    "881140": "化学制药", "881160": "旅游及酒店", "881281": "电池",
+    "881102": "养殖业", "881143": "医药商业", "881153": "房地产",
+    "881280": "风电设备", "881109": "化学制品", "881158": "零售",
+    "881134": "食品加工制造", "881128": "汽车服务及其他", "881268": "工程机械",
+    "881283": "多元金融", "881135": "纺织制造", "881145": "电力",
+    "881103": "农产品加工", "881159": "贸易", "881180": "石油加工贸易",
+    "881152": "物流", "881105": "煤炭开采加工", "881182": "美容护理",
+    "881264": "化学纤维", "881151": "机场航运", "881108": "化学原料",
+    "881273": "白酒", "881148": "港口航运", "881149": "公路铁路运输",
+    "881112": "钢铁", "881157": "证券", "881125": "汽车整车",
+    "881174": "厨卫电器", "881107": "油气开采及服务", "881263": "农化制品",
+    "881267": "能源金属", "881156": "保险", "881155": "银行",
+}
 
 
 def _to_float(v) -> float:
@@ -194,10 +232,18 @@ class THSDataSource(BaseDataSource):
             html = self._http_get(url, timeout=15)
             if not html:
                 break
+            # 允许 <a> 标签里有 target="_blank" 等其它属性
             found = re.findall(
-                r'thshy/detail/code/(\d+)/">([^<]+)</a>\s*</td>\s*<td[^>]*>([\d.\-]+)</td>',
+                r'thshy/detail/code/(\d+)/[^>]*>([^<]+)</a>\s*</td>\s*<td[^>]*>([\d.\-]+)</td>',
                 html,
             )
+            if not found:
+                # 再尝试宽松匹配（只要求 code/name，不要涨幅列）
+                found = re.findall(
+                    r'thshy/detail/code/(\d+)/[^>]*>([^<]+)</a>',
+                    html,
+                )
+                found = [(code, name, "0.0") for code, name in found]
             if not found:
                 break
             new_in_page = 0
@@ -214,22 +260,31 @@ class THSDataSource(BaseDataSource):
         return rows
 
     def get_em_industry_list(self) -> Optional[dict]:
-        """同花顺行业板块清单 {881xxx: 名称}。"""
+        """同花顺行业板块清单 {881xxx: 名称}。
+
+        实时接口失败时，启用静态兜底映射（90 个同花顺行业代码），
+        保证板块宇宙不空、刷新循环仍有目标可更新。
+        """
         rows = self._fetch_ths_industry_rows()
-        if not rows:
-            return None
-        return {r["code"]: r["name"] for r in rows}
+        if rows and len(rows) >= 50:
+            return {r["code"]: r["name"] for r in rows}
+        logger.warning(
+            "同花顺实时行业清单仅拿到 %d 个/接口失败，启用静态兜底 %d 个",
+            len(rows), len(_THS_FALLBACK_MAP)
+        )
+        return dict(_THS_FALLBACK_MAP)
 
     def get_realtime_sector_quotes(self, secids: Optional[list] = None) -> list:
         """同花顺行业板块实时快照（盘中涨跌）。返回 list[dict]{name,code,pct}。
 
         供看板顶部「盘中实时行情条」使用，红涨绿跌展示各行业涨跌幅。
+        当实时接口失败时，启用静态兜底（涨幅置 0），保证行情条不空白。
         """
         rows = self._fetch_ths_industry_rows()
-        quotes = []
-        for r in rows:
-            quotes.append({"name": r["name"], "code": r["code"], "pct": r["pct"]})
-        return quotes
+        if rows:
+            return [{"name": r["name"], "code": r["code"], "pct": r["pct"]} for r in rows]
+        logger.warning("同花顺实时行情接口失败，启用静态兜底（涨幅置 0）")
+        return [{"name": name, "code": code, "pct": 0.0} for code, name in _THS_FALLBACK_MAP.items()]
 
     # ============================================================
     # BaseDataSource 抽象方法实现

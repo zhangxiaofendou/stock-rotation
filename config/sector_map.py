@@ -1,16 +1,17 @@
 """
-板块分类映射模块（东方财富行业底座）
+板块分类映射模块（同花顺行业底座）
 ==================================
-板块宇宙采用**东方财富行业板块**（代码 BKxxxx），而非申万：
+板块宇宙采用**同花顺行业板块**（代码 881xxx），而非申万/东方财富：
 - 申万指数上游(swsindex.com)长期停滞在 7.30，无法满足「数据到最新交易日」诉求；
-- 东方财富行业板块 K 线为活跃源，收盘后即可取到最新交易日（实测含 7.31）。
+- 东方财富行业板块在云端常因 K 线/清单接口被掐而回退 AkShare，同样卡在 7.30；
+- 同花顺行业板块 K 线为活跃源，收盘后即可取到最新交易日（实测含 7.31）。
 
 设计要点：
 - 模块级 `SW_LEVEL2_MAP` / `SECTOR_GROUPS` / `SW_LEVEL2_BENCHMARK` 初始为空，
   由 `refresh_em_universe(em_map)` **原地填充**（不重新赋值全局变量，
   以保证 `from config.sector_map import SW_LEVEL2_MAP` 的引用始终有效）。
 - 真实板块清单由 `data/sector_universe.ensure_em_industry_map(source)` 在
-  管线/看板启动时拉取（缓存 JSON → 东财实时 → 兜底），并调用本模块的
+  管线/看板启动时拉取（缓存 JSON → 同花顺实时 → 静态兜底），并调用本模块的
   `refresh_em_universe` 完成填充。
 - 板块组（大金融/新能源/消费/周期/科技/医药）按行业名**关键词自动归类**。
 """
@@ -131,7 +132,7 @@ def refresh_em_universe(em_map: dict):
 
 
 def get_em_industry_universe() -> dict:
-    """返回当前板块宇宙 {BKxxxx: 名称}（供调试/校验）。"""
+    """返回当前板块宇宙 {code: 名称}（供调试/校验）。"""
     return {code: v[0] for code, v in SW_LEVEL2_MAP.items()}
 
 
@@ -164,7 +165,7 @@ def get_sector_group(code: str) -> str:
 
 
 def get_all_level2_codes() -> list:
-    """获取所有行业板块代码（东财 BKxxxx）"""
+    """获取所有行业板块代码（同花顺 881xxx）"""
     return list(SW_LEVEL2_MAP.keys())
 
 

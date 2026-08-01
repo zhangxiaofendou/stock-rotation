@@ -50,19 +50,43 @@ def _save_cache(em_map: dict):
         logger.warning("缓存东财行业清单失败: %s", e)
 
 
+def _is_cache_compatible(source, cached: dict) -> bool:
+    """检查缓存代码格式是否与当前数据源匹配，防止切源后旧缓存误导宇宙。"""
+    if not cached:
+        return True
+    cls_name = source.__class__.__name__
+    sample_keys = list(cached.keys())[:10]
+    if cls_name == "THSDataSource":
+        # 同花顺行业代码为 6 位数字 881xxx
+        return all(len(k) == 6 and k.isdigit() for k in sample_keys)
+    if cls_name == "EastMoneyLiveSource":
+        # 东方财富行业代码为 BKxxxx
+        return all(k.startswith("BK") for k in sample_keys)
+    if cls_name == "AkShareSource":
+        # AkShare 申万代码通常为 801xxx.SI / 801xxx
+        return all((k.startswith("801") and k.endswith(".SI")) or k.startswith("801") for k in sample_keys)
+    return True
+
+
 def ensure_em_industry_map(source, force: bool = False) -> dict:
     """确保板块宇宙已就绪：拉取清单并填充 config.sector_map。
 
     参数:
-        source: 任意 BaseDataSource 实例（需实现 get_em_industry_list；
-                东方财富源直接拉，回退 AkShare）。
+        source: 任意 BaseDataSource 实例（需实现 get_em_industry_list）。
         force: 为 True 时忽略缓存，强制实时拉取。
     返回:
-        东财行业清单 {BKxxxx: 名称}（可能为空 dict，表示拉取失败）。
+        行业清单 {code: 名称}（可能为空 dict，表示拉取失败）。
     """
     from config import sector_map
 
     cached = _load_cache() if not force else {}
+    if cached and not _is_cache_compatible(source, cached):
+        logger.warning(
+            "检测到缓存代码格式与当前数据源 %s 不匹配（样例 %s），忽略旧缓存",
+            source.__class__.__name__, list(cached.keys())[:5]
+        )
+        cached = {}
+
     em_map = None
 
     # 缓存为空或明显不完整（行业数过少）时，优先实时拉取，避免被残缺种子卡死。
@@ -70,7 +94,7 @@ def ensure_em_industry_map(source, force: bool = False) -> dict:
         try:
             em_map = source.get_em_industry_list()
         except Exception as e:
-            logger.warning("东财行业清单实时拉取异常: %s", e)
+            logger.warning("行业清单实时拉取异常: %s", e)
             em_map = None
         if em_map:
             _save_cache(em_map)
@@ -80,11 +104,30 @@ def ensure_em_industry_map(source, force: bool = False) -> dict:
 
     if not em_map:
         logger.error(
-            "东财行业清单为空：无法构建板块宇宙。请检查网络（云端）或缓存文件 %s",
+            "行业清单为空：无法构建板块宇宙。请检查网络（云端）或缓存文件 %s",
             CACHE_PATH,
         )
     else:
-        logger.info("板块宇宙就绪：%d 个东财行业板块", len(em_map))
+        logger.info("板块宇宙就绪：%d 个行业板块", len(em_map))
 
     sector_map.refresh_em_universe(em_map)
+
+    # 清理旧数据源留下的 sector_hist 新鲜度记录，避免 dashboard 汇总仍显示 7.30
+    try:
+        from data.storage.sqlite_store import SQLiteStore
+        store = SQLiteStore()
+        fresh_df = store.get_freshness_report()
+        if not fresh_df.empty:
+            stale_keys = fresh_df.loc[
+                (fresh_df["data_type"] == "sector_hist") &
+                (~fresh_df["data_key"].isin(em_map.keys())),
+                "data_key"
+            ].tolist()
+            for key in stale_keys:
+                store.delete_freshness("sector_hist", key)
+            if stale_keys:
+                logger.info("清理旧 sector_hist 新鲜度记录 %d 条", len(stale_keys))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("清理旧 sector_hist 新鲜度记录失败: %s", e)
+
     return em_map

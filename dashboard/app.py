@@ -215,6 +215,16 @@ def render_data_source_health():
         if p.get("sample_name"):
             st.caption(f"抽样首个行业 = {p['sample_name']}")
 
+        # 补充：实际可用于更新的行业数（含兜底）
+        try:
+            from data.sources import get_data_source
+            em_map = get_data_source().get_em_industry_list() or {}
+            if em_map:
+                fallback_note = "（含静态兜底）" if not p.get("list_ok") else ""
+                st.caption(f"当前板块宇宙可用行业数：{len(em_map)}{fallback_note}")
+        except Exception:  # noqa: BLE001
+            pass
+
 
 def is_trading_now() -> bool:
     """判断当前是否为 A 股交易时段（周一至周五 9:30-11:30, 13:00-15:00）。"""
@@ -337,11 +347,11 @@ def main():
             else:
                 st.error(msg)
 
-        # 盘中实时刷新开关（仅东方财富源支持）
+        # 盘中实时刷新开关
         live_realtime = st.checkbox(
             "🔴 盘中实时刷新（每 20 秒）",
             value=False,
-            help="开启后行情条在交易时段每 20 秒自动刷新；需东方财富源且网络可达。",
+            help="开启后行情条在交易时段每 20 秒自动刷新；需同花顺源且网络可达。",
         )
 
         # 各数据类型最新日期明细
