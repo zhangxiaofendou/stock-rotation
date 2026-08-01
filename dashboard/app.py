@@ -188,7 +188,7 @@ def _probe_data_source() -> dict:
 
 def render_data_source_health():
     """侧栏数据源诊断：一眼看清哪个东财接口被网络掐断、行业数据为何滞后。"""
-    with st.sidebar.expander("🔧 数据源诊断（7.30 滞后排查）", expanded=False):
+    with st.sidebar.expander("🔧 数据源诊断（7.30 滞后排查）", expanded=True):
         try:
             p = _probe_data_source()
         except Exception as e:  # noqa: BLE001
@@ -308,6 +308,10 @@ def main():
     # ================================================================
     with st.sidebar:
         st.title("📊 板块轮动分析")
+
+        # 数据源诊断：为何刷新后行业数据仍滞后到 7.30（置顶 + 默认展开，确保一眼可见）
+        render_data_source_health()
+
         st.markdown("---")
 
         # 数据状态与手动刷新
@@ -361,9 +365,6 @@ def main():
 
         # 运行保障（可观测性）：最近运行 / 下次运行 / 失败原因 / 双源校验
         _render_run_observability()
-
-        # 数据源诊断：为何刷新后行业数据仍滞后到 7.30
-        render_data_source_health()
 
         st.markdown("---")
 
