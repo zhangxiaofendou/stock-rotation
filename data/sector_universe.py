@@ -92,7 +92,7 @@ def _purge_legacy_sectors(store: "SQLiteStore", valid_codes: set):
             placeholders = ",".join("?" * len(legacy))
             # 先清子表 orphan 行（外键开启，先子后父）
             for tbl in ("signal_performance", "signal_events", "sector_stocks",
-                        "benchmark_map", "sector_groups"):
+                        "benchmark_map", "sector_groups", "research_reports"):
                 try:
                     conn.execute(
                         "DELETE FROM %s WHERE sector_code IN (%s)" % (tbl, placeholders),
