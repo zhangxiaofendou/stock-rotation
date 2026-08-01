@@ -178,17 +178,17 @@ def _render_run_observability():
 def _probe_data_source() -> dict:
     """缓存 3 分钟的数据源连通性探针（解释为何行业数据滞后到 7.30）。"""
     try:
-        from data.health_probe import probe_eastmoney, verdict
-        p = probe_eastmoney()
-        p["_verdict"] = verdict(p)
+        from data.health_probe import probe_ths, verdict_ths
+        p = probe_ths()
+        p["_verdict"] = verdict_ths(p)
         return p
     except Exception as e:  # noqa: BLE001
         return {"_err": str(e)}
 
 
 def render_data_source_health():
-    """侧栏数据源诊断：一眼看清哪个东财接口被网络掐断、行业数据为何滞后。"""
-    with st.sidebar.expander("🔧 数据源诊断（7.30 滞后排查）", expanded=True):
+    """侧栏数据源诊断：一眼看清同花顺各接口是否可达、行业数据为何滞后。"""
+    with st.sidebar.expander("🔧 数据源诊断（同花顺滞后排查）", expanded=True):
         try:
             p = _probe_data_source()
         except Exception as e:  # noqa: BLE001
@@ -205,15 +205,15 @@ def render_data_source_health():
         else:
             st.error(v)
         st.caption(
-            f"行业清单clist: {'✅' if p.get('clist_ok') else '❌'}"
-            f" ｜ K线(push2): {'✅' if p.get('kline_push2_ok') else '❌'}"
-            f" ｜ K线(push2his): {'✅' if p.get('kline_push2his_ok') else '❌'}"
-            f" ｜ 实时push2: {'✅' if p.get('quote_ok') else '❌'}"
+            f"行业清单: {'✅' if p.get('list_ok') else '❌'}"
+            f"（{p.get('list_count', 0)}个）"
+            f" ｜ K线: {'✅' if p.get('kline_ok') else '❌'}"
+            f" ｜ 实时: {'✅' if p.get('realtime_ok') else '❌'}"
         )
-        if p.get("kline_push2_date"):
-            st.caption(f"抽样(银行BK0477)最新·push2 = {p['kline_push2_date']}")
-        if p.get("kline_push2his_date"):
-            st.caption(f"抽样(银行BK0477)最新·push2his = {p['kline_push2his_date']}")
+        if p.get("kline_date"):
+            st.caption(f"抽样(半导体881121)最新K线 = {p['kline_date']}")
+        if p.get("sample_name"):
+            st.caption(f"抽样首个行业 = {p['sample_name']}")
 
 
 def is_trading_now() -> bool:
@@ -233,7 +233,7 @@ REALTIME_INTERVAL = 20  # 秒
 
 @st.cache_data(ttl=10, show_spinner=False)
 def _fetch_realtime_quotes() -> list:
-    """拉取东财行业板块实时快照。失败返回 []。"""
+    """拉取同花顺行业板块实时快照。失败返回 []。"""
     try:
         from data.sources import get_data_source
         src = get_data_source()
@@ -261,7 +261,7 @@ def render_realtime_ticker(live: bool):
 
     col_a, col_b = st.columns([4, 1])
     with col_a:
-        st.markdown("#### 📈 盘中实时行情 · 东方财富行业板块")
+        st.markdown("#### 📈 盘中实时行情 · 同花顺行业板块")
     with col_b:
         if not quotes:
             st.caption("⚪ 实时源不可用")
@@ -271,7 +271,7 @@ def render_realtime_ticker(live: bool):
             st.caption("⚪ 已收盘")
 
     if not quotes:
-        st.info("当前未取到实时行情（需东方财富源且网络可达；本沙箱网络受限时可能为空）。")
+        st.info("当前未取到实时行情（需同花顺源且网络可达；本沙箱网络受限时可能为空）。")
         return
 
     ups = [q for q in quotes if q["pct"] > 0]
@@ -300,7 +300,7 @@ def main():
         initial_sidebar_state="expanded",
     )
 
-    # 启动时确保板块宇宙(东财行业)就绪，并刷新 SQLite 板块元数据
+    # 启动时确保板块宇宙(同花顺行业)就绪，并刷新 SQLite 板块元数据
     ensure_universe()
 
     # ================================================================

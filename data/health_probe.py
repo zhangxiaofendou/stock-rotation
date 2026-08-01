@@ -10,6 +10,7 @@ clist(行业清单) / push2 K线 / push2his K线 / push2 实时 四个接口的�
 """
 
 import json
+import re
 import urllib.request
 import logging
 
@@ -124,3 +125,92 @@ def verdict(probe: dict) -> str:
     if probe["clist_ok"]:
         return "❌ 东财行业 K 线不可达（clist 通但 K 线被掐），将回退 AkShare → 数据滞后至 7.30"
     return "❌ 东财整体不可达（clist/K线均失败），将回退 AkShare → 数据滞后至 7.30"
+
+
+# ============================================================
+# 同花顺探针（ths 主源）
+# ============================================================
+_THS_PROBE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+    "Referer": "https://q.10jqka.com.cn/",
+}
+
+
+def _probe_ths(url: str, timeout: int = 6) -> dict:
+    try:
+        req = urllib.request.Request(url, headers=_THS_PROBE_HEADERS)
+        raw = urllib.request.urlopen(req, timeout=timeout).read().decode("utf-8", "ignore")
+        return {"ok": True, "raw": raw, "err": None}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "raw": None, "err": f"{type(e).__name__}: {e}"}
+
+
+def _ths_last_kline_date(raw: str) -> str:
+    """从同花顺 K 线 JSONP 响应里取最后一根 K 线的日期(YYYYMMDD)。"""
+    try:
+        s = raw.index("(")
+        e = raw.rindex(")")
+        obj = json.loads(raw[s + 1:e])
+        data = obj.get("data") or ""
+        if data:
+            last = data.split(";")[-1]
+            if last:
+                return last.split(",")[0]
+    except Exception:
+        pass
+    return ""
+
+
+def probe_ths() -> dict:
+    """探测同花顺各接口可达性，返回结构化结果。"""
+    out = {
+        "list_ok": False,
+        "list_count": 0,
+        "kline_ok": False,
+        "kline_date": "",
+        "realtime_ok": False,
+        "sample_name": "",
+    }
+
+    # 1) 行业清单（thshy 行业列表，无需登录）
+    r = _probe_ths(
+        "https://q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/1/ajax/1/"
+    )
+    if r["ok"]:
+        found = re.findall(r'thshy/detail/code/(\d+)/">([^<]+)</a>', r["raw"])
+        if found:
+            out["list_ok"] = True
+            out["list_count"] = len(found)
+            out["sample_name"] = found[0][1]
+
+    # 2) 行业 K 线（半导体 881121，最新交易日）
+    r = _probe_ths("https://d.10jqka.com.cn/v6/line/bk_881121/01/last20.js")
+    if r["ok"]:
+        dt = _ths_last_kline_date(r["raw"])
+        if dt:
+            out["kline_ok"] = True
+            out["kline_date"] = f"{dt[:4]}-{dt[4:6]}-{dt[6:8]}"
+
+    # 3) 实时行情（同行业列表接口，已含各行业涨跌幅列）
+    r = _probe_ths(
+        "https://q.10jqka.com.cn/thshy/index/field/199112/order/desc/page/1/ajax/1/"
+    )
+    if r["ok"] and re.search(
+        r'thshy/detail/code/\d+/">[^<]+</a>\s*</td>\s*<td[^>]*>[\d.\-]+</td>', r["raw"]
+    ):
+        out["realtime_ok"] = True
+
+    return out
+
+
+def verdict_ths(probe: dict) -> str:
+    """根据同花顺探针结果给出人话结论。"""
+    if probe["kline_ok"]:
+        dt = probe["kline_date"]
+        if dt and dt > "2026-07-30":
+            return (f"✅ 同花顺行业K线可达，抽样(半导体881121)最新 {dt}，"
+                    f"数据应已到最新交易日")
+        return f"⚠️ 同花顺K线可达但抽样最新仅 {dt}，仍偏旧（可能部分板块滞后）"
+    if probe["list_ok"]:
+        return "❌ 同花顺行业清单可达但K线失败，将回退 AkShare → 数据可能滞后"
+    return "❌ 同花顺整体不可达（清单/K线均失败），将回退 AkShare → 数据滞后"
