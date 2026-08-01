@@ -7,6 +7,7 @@ Streamlit多页应用，侧边栏导航。
 import streamlit as st
 import sys
 import os
+import time
 from typing import Dict, Any
 
 # 确保项目根目录在 Python path 中
@@ -170,6 +171,125 @@ def _render_run_observability():
     st.caption(f"📅 下次计划运行：{info.get('next_run')}")
 
 
+# ============================================================
+# 数据源诊断 & 盘中实时行情条
+# ============================================================
+@st.cache_data(ttl=180, show_spinner=False)
+def _probe_data_source() -> dict:
+    """缓存 3 分钟的数据源连通性探针（解释为何行业数据滞后到 7.30）。"""
+    try:
+        from data.health_probe import probe_eastmoney, verdict
+        p = probe_eastmoney()
+        p["_verdict"] = verdict(p)
+        return p
+    except Exception as e:  # noqa: BLE001
+        return {"_err": str(e)}
+
+
+def render_data_source_health():
+    """侧栏数据源诊断：一眼看清哪个东财接口被网络掐断、行业数据为何滞后。"""
+    with st.sidebar.expander("🔧 数据源诊断（7.30 滞后排查）", expanded=False):
+        try:
+            p = _probe_data_source()
+        except Exception as e:  # noqa: BLE001
+            st.error(f"诊断异常: {e}")
+            return
+        if "_err" in p:
+            st.error(f"诊断模块异常: {p['_err']}")
+            return
+        v = p.get("_verdict", "")
+        if v.startswith("✅"):
+            st.success(v)
+        elif v.startswith("⚠️"):
+            st.warning(v)
+        else:
+            st.error(v)
+        st.caption(
+            f"行业清单clist: {'✅' if p.get('clist_ok') else '❌'}"
+            f" ｜ K线(push2): {'✅' if p.get('kline_push2_ok') else '❌'}"
+            f" ｜ K线(push2his): {'✅' if p.get('kline_push2his_ok') else '❌'}"
+            f" ｜ 实时push2: {'✅' if p.get('quote_ok') else '❌'}"
+        )
+        if p.get("kline_push2_date"):
+            st.caption(f"抽样(银行BK0477)最新·push2 = {p['kline_push2_date']}")
+        if p.get("kline_push2his_date"):
+            st.caption(f"抽样(银行BK0477)最新·push2his = {p['kline_push2his_date']}")
+
+
+def is_trading_now() -> bool:
+    """判断当前是否为 A 股交易时段（周一至周五 9:30-11:30, 13:00-15:00）。"""
+    import datetime
+    now = datetime.datetime.now()
+    if now.weekday() >= 5:
+        return False
+    t = now.time()
+    m1 = datetime.time(9, 30) <= t <= datetime.time(11, 30)
+    m2 = datetime.time(13, 0) <= t <= datetime.time(15, 0)
+    return m1 or m2
+
+
+REALTIME_INTERVAL = 20  # 秒
+
+
+@st.cache_data(ttl=10, show_spinner=False)
+def _fetch_realtime_quotes() -> list:
+    """拉取东财行业板块实时快照。失败返回 []。"""
+    try:
+        from data.sources import get_data_source
+        src = get_data_source()
+        if hasattr(src, "get_realtime_sector_quotes"):
+            return src.get_realtime_sector_quotes() or []
+    except Exception as e:  # noqa: BLE001
+        logger.warning(f"实时行情拉取失败: {e}")
+    return []
+
+
+def _chip_html(name, pct, up):
+    color = "#d4380d" if up else "#389e0d"  # 红涨绿跌（A 股惯例）
+    bg = "#fff1f0" if up else "#f6ffed"
+    return (
+        f'<span style="display:inline-block; margin:3px 4px; padding:3px 8px; '
+        f'border-radius:10px; background:{bg}; color:{color}; '
+        f'font-size:13px; font-weight:600; border:1px solid {color};">'
+        f'{name} {pct:+.2f}%</span>'
+    )
+
+
+def render_realtime_ticker(live: bool):
+    """顶部盘中实时行情条。live=True 时由 main() 在渲染完整个页面后统一休眠重跑。"""
+    quotes = _fetch_realtime_quotes()
+
+    col_a, col_b = st.columns([4, 1])
+    with col_a:
+        st.markdown("#### 📈 盘中实时行情 · 东方财富行业板块")
+    with col_b:
+        if not quotes:
+            st.caption("⚪ 实时源不可用")
+        elif is_trading_now():
+            st.caption("🔴 交易时段")
+        else:
+            st.caption("⚪ 已收盘")
+
+    if not quotes:
+        st.info("当前未取到实时行情（需东方财富源且网络可达；本沙箱网络受限时可能为空）。")
+        return
+
+    ups = [q for q in quotes if q["pct"] > 0]
+    downs = [q for q in quotes if q["pct"] < 0]
+    flat = len(quotes) - len(ups) - len(downs)
+    st.caption(f"共 {len(quotes)} 个行业 ｜ 🔴上涨 {len(ups)} ｜ 🟢下跌 {len(downs)} ｜ ⚪平 {flat}")
+
+    top_up = sorted(ups, key=lambda x: -x["pct"])[:24]
+    top_down = sorted(downs, key=lambda x: x["pct"])[:24]
+    chips = "".join(_chip_html(q["name"], q["pct"], True) for q in top_up)
+    chips += "".join(_chip_html(q["name"], q["pct"], False) for q in top_down)
+    st.markdown(
+        f'<div style="overflow-x:auto; white-space:nowrap; padding:6px 0; '
+        f'border-top:1px solid #eee; border-bottom:1px solid #eee;">{chips}</div>',
+        unsafe_allow_html=True,
+    )
+
+
 def main():
     """主入口"""
     # 页面配置
@@ -213,6 +333,13 @@ def main():
             else:
                 st.error(msg)
 
+        # 盘中实时刷新开关（仅东方财富源支持）
+        live_realtime = st.checkbox(
+            "🔴 盘中实时刷新（每 20 秒）",
+            value=False,
+            help="开启后行情条在交易时段每 20 秒自动刷新；需东方财富源且网络可达。",
+        )
+
         # 各数据类型最新日期明细
         if summary_df is not None and not summary_df.empty:
             st.markdown("##### 各数据类型最新日期")
@@ -234,6 +361,9 @@ def main():
 
         # 运行保障（可观测性）：最近运行 / 下次运行 / 失败原因 / 双源校验
         _render_run_observability()
+
+        # 数据源诊断：为何刷新后行业数据仍滞后到 7.30
+        render_data_source_health()
 
         st.markdown("---")
 
@@ -258,6 +388,11 @@ def main():
         st.caption("P3看板层 v1.0")
 
     # ================================================================
+    # 顶部盘中实时行情条
+    # ================================================================
+    render_realtime_ticker(live_realtime)
+
+    # ================================================================
     # 页面路由
     # ================================================================
     if page == "市场温度计":
@@ -278,6 +413,11 @@ def main():
     elif page == "盘后报告":
         from dashboard.pages.reports import render
         render()
+
+    # 盘中实时自动刷新：渲染完整个页面后统一休眠并重跑（避免遮挡当前页）
+    if live_realtime:
+        time.sleep(REALTIME_INTERVAL)
+        st.rerun()
 
 
 if __name__ == "__main__":

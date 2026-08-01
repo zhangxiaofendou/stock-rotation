@@ -66,6 +66,16 @@ _TENCENT_HEADERS = {
 }
 
 
+def _to_float(v) -> float:
+    """把东财字段(可能是 str/'-'/None)安全转 float，失败返回 0.0。"""
+    try:
+        if v in (None, "", "-"):
+            return 0.0
+        return float(v)
+    except (ValueError, TypeError):
+        return 0.0
+
+
 def _secid_of_index(code: str) -> Optional[str]:
     """把基准指数代码（sh000300 / 000300.SH / 000300）转为东财 secid（1.000300）。"""
     code = str(code).strip()
@@ -160,23 +170,32 @@ class EastMoneyLiveSource(BaseDataSource):
         return None
 
     def _kline_eastmoney(self, secid: str, start: str, end: str, fqt: int, klt: int) -> Optional[pd.DataFrame]:
-        """东方财富 K 线（push2his）。失败返回 None。"""
-        url = (
-            "https://push2his.eastmoney.com/api/qt/stock/kline/get"
-            f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6"
-            f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
-            f"&klt={klt}&fqt={fqt}&beg={start}&end={end}"
-        )
+        """东方财富 K 线。
+
+        主机优先级：先试 ``push2.eastmoney.com``（与 clist / 实时快照同域名，
+        云端通常可达），再试 ``push2his.eastmoney.com`` 兜底。任一可用即返回，
+        全部失败返回 None（交由上层回退腾讯/AkShare）。
+        """
+        hosts = [
+            "https://push2.eastmoney.com/api/qt/stock/kline/get",
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+        ]
         last_err = None
-        for attempt in range(self._retries + 1):
+        for host in hosts:
+            url = (
+                f"{host}"
+                f"?secid={secid}&fields1=f1,f2,f3,f4,f5,f6"
+                f"&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
+                f"&klt={klt}&fqt={fqt}&beg={start}&end={end}"
+            )
             try:
                 req = urllib.request.Request(url, headers=_HEADERS)
                 raw = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "ignore")
                 d = json.loads(raw)
                 data = d.get("data")
                 if not data or not data.get("klines"):
-                    logger.debug("东财K线 %s 无数据", secid)
-                    return None
+                    logger.debug("东财K线 %s 无数据(host=%s)", secid, host)
+                    continue  # 换个 host 再试
                 rows = []
                 for kl in data["klines"]:
                     p = kl.split(",")
@@ -196,17 +215,16 @@ class EastMoneyLiveSource(BaseDataSource):
                     except (ValueError, IndexError):
                         continue
                 if not rows:
-                    return None
+                    continue  # 换个 host 再试
                 df = pd.DataFrame(rows, columns=_KLINE_FIELDS)
                 df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
                 return df
             except Exception as e:
                 last_err = e
-                if attempt < self._retries:
-                    time.sleep(self._retry_interval * (self._backoff ** attempt))
-                    continue
-                logger.debug("东财K线 %s 失败: %s", secid, e)
-                return None
+                logger.debug("东财K线 %s 失败(host=%s): %s", secid, host, e)
+                continue  # 换个 host 再试
+        if last_err:
+            logger.debug("东财K线 %s 所有 host 失败: %s", secid, last_err)
         return None
 
     def _kline_tencent(self, secid: str, start: str, end: str, fqt: int) -> Optional[pd.DataFrame]:
@@ -279,6 +297,49 @@ class EastMoneyLiveSource(BaseDataSource):
             logger.warning("东财实时快照失败: %s", e)
         return []
 
+    def get_realtime_sector_quotes(self, secids: Optional[list] = None) -> list:
+        """批量实时快照（东方财富 ulist.np/get），一次请求拿全部行业板块的现价/涨跌幅。
+
+        返回 list[dict]{code, name, price, pct, timestamp}；失败返回 []。
+        不传 secids 时取当前东财行业宇宙全部 BKxxxx。
+        """
+        if secids is None:
+            try:
+                from config.sector_map import get_all_level2_codes
+                secids = [f"90.{c}" for c in get_all_level2_codes()]
+            except Exception:
+                secids = []
+        if not secids:
+            return []
+
+        out = []
+        batch = 200  # 单批上限，避免 URL 过长
+        for i in range(0, len(secids), batch):
+            chunk = secids[i:i + batch]
+            secids_str = ",".join(chunk)
+            url = (
+                "https://push2.eastmoney.com/api/qt/ulist.np/get"
+                f"?secids={secids_str}&fields=f12,f13,f14,f2,f3,f62,f86&np=1"
+            )
+            try:
+                req = urllib.request.Request(url, headers=_HEADERS)
+                raw = urllib.request.urlopen(req, timeout=15).read().decode("utf-8", "ignore")
+                d = json.loads(raw)
+                items = d.get("data", {}).get("diff") or []
+                for it in items:
+                    out.append({
+                        "code": it.get("f12"),
+                        "name": it.get("f14"),
+                        "price": _to_float(it.get("f2")),
+                        "pct": _to_float(it.get("f3")),
+                        "main_net": _to_float(it.get("f62")),
+                        "timestamp": it.get("f86"),
+                    })
+            except Exception as e:
+                logger.warning("东财实时批量快照失败(批次 %d): %s", i, e)
+                continue
+        return out
+
     # ============================================================
     # 申万行业分类（委托 AkShare）
     # ============================================================
@@ -307,7 +368,11 @@ class EastMoneyLiveSource(BaseDataSource):
             df = self._kline(secid)
             if df is not None and not df.empty:
                 return df.rename(columns=_CN_COLS)
-            # 主源失败 → 回退 AkShare 东财行业历史
+            # 主源(东财双 host)均失败 → 回退 AkShare 东财行业历史。
+            # 注意：AkShare 行业数据常滞后至 T-1+（实测停于 7.30），属次优，必须告警。
+            logger.warning(
+                "东财行业板块 %s K线不可达(push2/push2his 均失败)，回退 AkShare（数据可能滞后）", s
+            )
             ak = self._lazy_ak()
             if ak is not None:
                 return ak.get_em_industry_hist(s)
