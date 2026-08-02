@@ -302,6 +302,35 @@ def _render_positions(service: PortfolioHoldings):
             "持仓数量": st.column_config.NumberColumn(format="%.4f"),
         },
     )
+    with st.expander("✏️ 修改持仓属性（不新增交易）", expanded=False):
+        edit_code = st.selectbox("选择标的", positions["security_code"].astype(str).tolist(), format_func=lambda c: f"{c} ｜ {positions.loc[positions['security_code'].astype(str) == c, 'security_name'].iloc[0]}")
+        current = positions[positions["security_code"].astype(str) == str(edit_code)].iloc[0]
+        with st.form("portfolio_edit_metadata"):
+            e1, e2, e3 = st.columns(3)
+            with e1:
+                edit_qty = st.number_input("持仓数量", min_value=0.0001, value=float(current["quantity"]), step=1.0, format="%.4f")
+            with e2:
+                edit_cost = st.number_input("平均成本", min_value=0.0, value=float(current["avg_cost"]), step=0.0001, format="%.4f")
+            with e3:
+                edit_type = st.selectbox("类型", ["stock", "etf", "fund"], index=["stock", "etf", "fund"].index(str(current.get("asset_type") or "stock")))
+            e4, e5 = st.columns(2)
+            with e4:
+                edit_sector = st.text_input("所属行业/板块", value=str(current.get("sector_name") or ""))
+            with e5:
+                edit_sector_code = st.text_input("板块代码（可选）", value=str(current.get("sector_code") or ""))
+            edit_note = st.text_input("备注", value=str(current.get("note") or ""))
+            edit_submitted = st.form_submit_button("保存修改", type="primary", width="stretch")
+        if edit_submitted:
+            try:
+                service.update_metadata(
+                    str(edit_code), quantity=edit_qty, avg_cost=edit_cost,
+                    asset_type=edit_type, sector_name=edit_sector.strip() or None,
+                    sector_code=edit_sector_code.strip() or None, note=edit_note.strip() or None,
+                )
+                st.success(f"已修改 {edit_code}，不会新增交易记录。")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"修改失败：{exc}")
     return positions, quotes
 
 

@@ -968,6 +968,39 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    def update_portfolio_metadata(self, user_id: str, security_code: str, **fields) -> None:
+        """仅更新当前用户持仓元数据，不写交易流水、不改数量/成本。"""
+        allowed = {"security_name", "asset_type", "sector_code", "sector_name", "quantity", "avg_cost", "target_weight", "stop_loss", "note"}
+        changes = {k: v for k, v in fields.items() if k in allowed}
+        if not changes:
+            raise ValueError("没有可修改的持仓属性")
+        if "asset_type" in changes and changes["asset_type"] not in {"stock", "etf", "fund"}:
+            raise ValueError("资产类型只能是 stock、etf 或 fund")
+        if "quantity" in changes and float(changes["quantity"]) <= 0:
+            raise ValueError("持仓数量必须大于 0")
+        if "avg_cost" in changes and float(changes["avg_cost"]) < 0:
+            raise ValueError("平均成本不能为负数")
+        conn = self._get_conn()
+        try:
+            cols, vals = [], []
+            for key, value in changes.items():
+                cols.append(f"{key} = ?")
+                vals.append(value)
+            vals.extend([str(user_id), str(security_code)])
+            cur = conn.execute(
+                f"UPDATE portfolio_positions SET {', '.join(cols)}, updated_at = datetime('now', 'localtime') "
+                "WHERE user_id = ? AND security_code = ?",
+                vals,
+            )
+            if cur.rowcount == 0:
+                raise ValueError("未找到要修改的持仓")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     # ============================================================
     # 信号事件账本
     # ============================================================

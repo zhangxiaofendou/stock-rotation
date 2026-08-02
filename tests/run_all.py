@@ -38,6 +38,7 @@ SUITES = [
     ("持仓分析逻辑", "tests/selfcheck_portfolio_analysis.py"),
     ("费用自动估算", "tests/selfcheck_fees.py"),
     ("ETF板块关联", "tests/selfcheck_etf_sector.py"),
+    ("持仓属性修改", "tests/selfcheck_metadata_edit.py"),
 ]
 
 
