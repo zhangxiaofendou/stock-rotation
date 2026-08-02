@@ -21,6 +21,7 @@ COMPILE_TARGETS = [
     "portfolio/holdings.py",
     "portfolio/stock_lookup.py",
     "portfolio/fees.py",
+    "portfolio/stock_lookup.py",
     "report/generator.py",
     "data/storage/pg_store.py",
     "data/storage/sqlite_store.py",
@@ -36,6 +37,7 @@ SUITES = [
     ("行情自动补全", "tests/selfcheck_lookup.py"),
     ("持仓分析逻辑", "tests/selfcheck_portfolio_analysis.py"),
     ("费用自动估算", "tests/selfcheck_fees.py"),
+    ("ETF板块关联", "tests/selfcheck_etf_sector.py"),
 ]
 
 

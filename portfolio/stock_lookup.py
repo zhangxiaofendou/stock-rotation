@@ -38,6 +38,16 @@ _HEADERS = {
 # 进程级缓存：{code: (expire_ts, info_dict | None)}
 _cache: dict[str, tuple[float, Optional[dict]]] = {}
 
+# ETF主题到项目板块名称的明确映射。只配置已确认的产品，避免从名称猜行业。
+_ETF_SECTOR_MAP = {
+    "159766": "旅游",
+}
+
+
+def is_etf_code(code: str) -> bool:
+    code = normalize_code(code)
+    return bool(code and code.startswith(("15", "16", "50", "51", "56", "58")))
+
 
 # ============================================================
 # 代码规范化
@@ -112,7 +122,12 @@ def _fetch_eastmoney(code: str) -> Optional[dict]:
             return None
         # 东财 f43 为 ×100 整数（如 135060=1350.60）；个别场景返回已除 100 的浮点，按类型区分
         price = float(price_raw) / 100.0 if isinstance(price_raw, int) else float(price_raw)
-        info = {"name": name, "price": round(price, 4), "sector_name": sector or None}
+        info = {
+            "name": name,
+            "price": round(price, 4),
+            "sector_name": sector or _ETF_SECTOR_MAP.get(code),
+            "asset_type": "etf" if is_etf_code(code) else "stock",
+        }
         logger.info("东财补全 %s → %s", code, info)
         return info
     except Exception as e:  # noqa: BLE001
@@ -143,7 +158,8 @@ def _fetch_tencent(code: str) -> Optional[dict]:
             info = {
                 "name": f[1].strip(),
                 "price": round(float(f[3]), 4),
-                "sector_name": None,
+                "sector_name": _ETF_SECTOR_MAP.get(code),
+                "asset_type": "etf" if is_etf_code(code) else "stock",
             }
             logger.info("腾讯补全 %s → %s", code, info)
             return info

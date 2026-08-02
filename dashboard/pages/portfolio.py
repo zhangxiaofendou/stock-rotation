@@ -235,6 +235,7 @@ def _render_record_form(service: PortfolioHoldings):
                     fee=fee,
                     sector_code=sector_code.strip() or None,
                     sector_name=sector_name or None,
+                    asset_type=(auto or {}).get("asset_type") or "stock",
                     target_weight=target_weight / 100 if target_weight else None,
                     stop_loss=stop_loss or None,
                     note=note.strip() or None,
