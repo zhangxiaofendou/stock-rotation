@@ -470,6 +470,16 @@ def main():
     with st.sidebar:
         st.title("📊 板块轮动分析")
 
+        # 导航（刷新保留、关页重置）—— 上移到侧边栏顶部，便于快速切换页面
+        from dashboard.components.nav_state import persistent_radio
+        page = persistent_radio(
+            "page",
+            ["市场温度计", "板块轮动监控", "持仓管理", "信号绩效", "策略研究", "盘后报告"],
+            label="导航菜单",
+        )
+
+        st.markdown("---")
+
         # 数据源诊断：为何刷新后行业数据仍滞后到 7.30（置顶 + 默认展开，确保一眼可见）
         render_data_source_health()
 
@@ -531,16 +541,6 @@ def main():
         # 运行保障（可观测性）：最近运行 / 下次运行 / 失败原因 / 双源校验
         _render_run_observability()
         render_src_badge("derived", base=["history"])
-
-        st.markdown("---")
-
-        # 导航（刷新保留、关页重置）
-        from dashboard.components.nav_state import persistent_radio
-        page = persistent_radio(
-            "page",
-            ["市场温度计", "板块轮动监控", "持仓管理", "信号绩效", "策略研究", "盘后报告"],
-            label="导航菜单",
-        )
 
         st.markdown("---")
         # 数据来源图例：解码界面各数据块的来源徽标
