@@ -304,14 +304,25 @@ def set_kv_if_absent(key: str, value: str) -> str:
         conn.close()
 
 
+_secret_cache: Optional[bytes] = None
+
+
 def get_session_secret() -> bytes:
-    """取会话签名密钥；不存在则生成并持久化。"""
+    """取会话签名密钥；不存在则生成并持久化。
+
+    进程内缓存：每次 rerun 都查库既慢又放大连接抖动的影响。
+    """
+    global _secret_cache
+    if _secret_cache is not None:
+        return _secret_cache
     existing = get_kv("session_secret")
     if existing:
-        return bytes.fromhex(existing)
+        _secret_cache = bytes.fromhex(existing)
+        return _secret_cache
     generated = secrets.token_bytes(32).hex()
     final = set_kv_if_absent("session_secret", generated)
-    return bytes.fromhex(final)
+    _secret_cache = bytes.fromhex(final)
+    return _secret_cache
 
 
 # ============================================================

@@ -95,23 +95,44 @@ def verify_password(password: str, rec: dict) -> bool:
 # ============================================================
 # 会话签名
 # ============================================================
+_secret_cache: Optional[bytes] = None
+
+
 def _get_secret() -> bytes:
+    """取会话签名密钥（进程内缓存）。
+
+    必须缓存：否则每次 rerun 都要打一次数据库，且云库偶发抖动时会退回本地随机密钥，
+    导致此前签发的所有令牌集体失效、用户被莫名踢回登录页。
+    """
+    global _secret_cache
+    if _secret_cache is not None:
+        return _secret_cache
+
     if _use_pg():
         try:
-            return pg_store.get_session_secret()
+            _secret_cache = pg_store.get_session_secret()
+            return _secret_cache
         except Exception:
             pass  # 云库不可用时退回本地文件，至少不阻断登录界面渲染
     path = str(SESSION_SECRET_PATH)
     if os.path.exists(path):
         with open(path, "rb") as f:
-            return f.read()
+            _secret_cache = f.read()
+            return _secret_cache
     d = os.path.dirname(path)
     if d:
         os.makedirs(d, exist_ok=True)
     s = secrets.token_bytes(32)
     with open(path, "wb") as f:
         f.write(s)
+    _secret_cache = s
     return s
+
+
+def reset_secret_cache() -> None:
+    """清空密钥缓存（仅测试用）。"""
+    global _secret_cache
+    _secret_cache = None
 
 
 def _make_token(username: str) -> str:
@@ -175,16 +196,49 @@ def login(username: str, password: str) -> Tuple[bool, str]:
     return True, _make_token(username)
 
 
+_SESSION_KEY = "auth_user"
+
+
 def get_current_user() -> Optional[str]:
+    """返回当前登录用户名。
+
+    优先读 session_state：避免每次 rerun 都做一次令牌校验 + 查库，
+    同时规避 query_params 在表单提交后写入延迟导致的「登录后又被弹回」。
+    """
+    cached = st.session_state.get(_SESSION_KEY)
+    if cached:
+        return str(cached)
     token = st.query_params.get("token")
-    return _verify_token(token) if token else None
+    user = _verify_token(token) if token else None
+    if user:
+        st.session_state[_SESSION_KEY] = user
+    return user
 
 
-def set_session(username: str) -> None:
-    st.query_params["token"] = _make_token(username)
+def set_session(username_or_token: str) -> None:
+    """建立登录会话。
+
+    兼容传入「用户名」或「已签名令牌」两种形态：调用方曾把 login() 返回的令牌
+    直接传进来，若无脑再签一次名会得到「用户名=令牌串」的废令牌，
+    校验时查无此人从而被弹回登录页。这里统一归一化，杜绝该类调用错误。
+    """
+    value = str(username_or_token or "")
+    if not value:
+        return
+    resolved = _verify_token(value)  # 传进来的本身就是合法令牌时返回其用户名
+    if resolved:
+        username, token = resolved, value
+    else:
+        username, token = value, _make_token(value)
+    st.session_state[_SESSION_KEY] = username
+    st.query_params["token"] = token
 
 
 def clear_session() -> None:
+    try:
+        st.session_state.pop(_SESSION_KEY, None)
+    except Exception:
+        pass
     if "token" in st.query_params:
         del st.query_params["token"]
 
@@ -242,7 +296,7 @@ def _render_auth() -> None:
             try:
                 ok, payload = login(u, p)
                 if ok:
-                    set_session(payload)
+                    set_session((u or "").strip())  # 传用户名，非令牌
                     st.rerun()
                 else:
                     st.error(payload)
@@ -262,12 +316,12 @@ def _render_auth() -> None:
                 else:
                     ok, msg = register(u, p)
                     if ok:
-                        ok2, token = login(u, p)
+                        ok2, payload = login(u, p)
                         if ok2:
-                            set_session(token)
+                            set_session((u or "").strip())  # 传用户名，非令牌
                             st.rerun()
                         else:
-                            st.error(token)
+                            st.error(payload)
                     else:
                         st.error(msg)
             except Exception as e:
