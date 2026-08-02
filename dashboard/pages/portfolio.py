@@ -12,6 +12,7 @@ from model.state_machine import StateMachine
 from portfolio.holdings import PortfolioHoldings
 from portfolio.advisor import PortfolioAdvisor
 from portfolio.stock_lookup import lookup_stock_info, normalize_code
+from portfolio.fees import estimate_trade_fee
 from dashboard.components.data_source_badge import render_src_badge
 
 
@@ -179,7 +180,14 @@ def _render_record_form(service: PortfolioHoldings):
             with row2[0]:
                 trade_date = st.date_input("操作日期", value=date.today())
             with row2[1]:
-                fee = st.number_input("费用", min_value=0.0, value=0.0, step=0.01)
+                estimate = estimate_trade_fee(security_code, side, quantity, price)
+                fee = st.number_input(
+                    "费用（自动估算，可修改）",
+                    min_value=0.0,
+                    value=float(estimate.total),
+                    step=0.01,
+                    help=f"估算明细：佣金 ¥{estimate.commission:.2f} + 印花税 ¥{estimate.stamp_tax:.2f} + 过户费 ¥{estimate.transfer_fee:.2f}。实际以券商交割单为准。",
+                )
             security_name = st.text_input(
                 "证券名称（留空则保存时自动带出）",
                 value=st.session_state.get("pl_name", ""),
