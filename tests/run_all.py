@@ -19,6 +19,7 @@ COMPILE_TARGETS = [
     "diagnostics.py",
     "dashboard/app.py",
     "portfolio/holdings.py",
+    "portfolio/stock_lookup.py",
     "report/generator.py",
     "data/storage/pg_store.py",
     "data/storage/sqlite_store.py",
@@ -31,6 +32,7 @@ SUITES = [
     ("Postgres 存储层", "tests/selfcheck_pg.py"),
     ("诊断器有效性", "tests/selfcheck_diagnostics.py"),
     ("页面渲染冒烟", "tests/selfcheck_ui_smoke.py"),
+    ("行情自动补全", "tests/selfcheck_lookup.py"),
 ]
 
 
