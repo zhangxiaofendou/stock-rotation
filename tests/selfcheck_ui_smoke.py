@@ -143,6 +143,106 @@ def _guard_allows_logged_in():
 check("未登录被拦截", _guard_blocks_anonymous)
 check("已登录被放行", _guard_allows_logged_in)
 
+print("\n[5] 持仓录入表单（最少录入 + 自动补全）")
+
+import dashboard.pages.portfolio as portfolio_page  # noqa: E402
+
+
+def _make_service():
+    svc = mock.MagicMock()
+    return svc
+
+
+def _text_seq(values):
+    """按调用顺序返回 text_input 的值（代码/名称/行业名/行业代码/备注），
+    超出队列返回空串。MagicMock 统一 return_value 会让所有输入框返回同一
+    值，掩盖「名称留空」「行业覆盖」等真实分支，因此必须逐框区分。"""
+    queue = list(values) + [""] * 10
+    it = iter(queue)
+    return lambda *a, **k: next(it)
+
+
+def _num_seq(values):
+    """number_input 按调用顺序返回（数量/成交价/费用/目标仓位/止损价）。"""
+    queue = list(values) + [0.0] * 10
+    it = iter(queue)
+    return lambda *a, **k: next(it)
+
+
+def _reset_widgets():
+    st_mock.session_state.clear()
+    st_mock.button.return_value = False
+    st_mock.form_submit_button.return_value = False
+    st_mock.text_input.return_value = ""
+    st_mock.number_input.return_value = 0.0
+    st_mock.selectbox.return_value = "BUY"
+    st_mock.date_input.return_value = __import__("datetime").date.today()
+
+
+def _form_plain_render():
+    _reset_widgets()
+    with mock.patch.object(portfolio_page, "lookup_stock_info") as lu:
+        lu.return_value = None
+        portfolio_page._render_record_form(_make_service())
+
+
+def _query_success():
+    _reset_widgets()
+    st_mock.button.return_value = True
+    st_mock.text_input.side_effect = _text_seq(["600519"])
+    with mock.patch.object(portfolio_page, "lookup_stock_info") as lu:
+        lu.return_value = {"name": "贵州茅台", "price": 1350.6, "sector_name": "白酒Ⅱ"}
+        portfolio_page._render_record_form(_make_service())
+        lu.assert_called_once_with("600519")
+    assert st_mock.session_state.get("pl_lookup", {}).get("name") == "贵州茅台", "查询结果应写入会话"
+    assert st_mock.session_state.get("pl_price") == 1350.6, "最新价应作为成交价默认值"
+
+
+def _query_fail():
+    _reset_widgets()
+    st_mock.button.return_value = True
+    st_mock.text_input.side_effect = _text_seq(["999999"])
+    with mock.patch.object(portfolio_page, "lookup_stock_info") as lu:
+        lu.return_value = None
+        portfolio_page._render_record_form(_make_service())
+    assert "pl_lookup" not in st_mock.session_state, "查询失败不应残留查询结果"
+
+
+def _submit_autofill_success():
+    _reset_widgets()
+    st_mock.form_submit_button.return_value = True
+    st_mock.text_input.side_effect = _text_seq(["600519", "", "", "", ""])  # 名称留空
+    # number_input 按序：数量=100、成交价=0（留空走自动带出）、费用/目标/止损=0
+    st_mock.number_input.side_effect = _num_seq([100.0, 0.0, 0.0, 0.0, 0.0])
+    svc = _make_service()
+    with mock.patch.object(portfolio_page, "lookup_stock_info") as lu:
+        lu.return_value = {"name": "贵州茅台", "price": 1350.6, "sector_name": "白酒Ⅱ"}
+        portfolio_page._render_record_form(svc)
+    kwargs = svc.record_trade.call_args.kwargs
+    assert kwargs["security_name"] == "贵州茅台", "名称应自动带出"
+    assert kwargs["security_code"] == "600519", "代码应规整为 6 位"
+    assert kwargs["price"] == 1350.6, "价格应为自动带出的最新价"
+    assert kwargs["sector_name"] == "白酒Ⅱ", "行业应自动带出"
+
+
+def _submit_lookup_failed_requires_manual():
+    _reset_widgets()
+    st_mock.form_submit_button.return_value = True
+    st_mock.text_input.side_effect = _text_seq(["600519", "", "", "", ""])  # 名称留空
+    st_mock.number_input.return_value = 100.0
+    svc = _make_service()
+    with mock.patch.object(portfolio_page, "lookup_stock_info") as lu:
+        lu.return_value = None  # 网络不可用
+        portfolio_page._render_record_form(svc)
+    assert svc.record_trade.call_count == 0, "补全失败且未手填名称时不得保存"
+
+
+check("表单空渲染不崩", _form_plain_render)
+check("查询成功自动带出", _query_success)
+check("查询失败不残留结果", _query_fail)
+check("提交时名称/价格/行业自动补全", _submit_autofill_success)
+check("补全失败不误保存", _submit_lookup_failed_requires_manual)
+
 print("\n" + "=" * 62)
 print(f"  结果：{_passed} 通过 / {_failed} 失败")
 print("=" * 62)
