@@ -148,6 +148,55 @@ def render():
         render_mirror(show_header=False)
 
 
+@st.cache_data(ttl=3600)
+def _build_fund_flow_figures():
+    """构建资金流向地图图表（缓存，避免每次 tab 切换重算）。"""
+    sqlite = SQLiteStore()
+    latest = sqlite.get_latest_fund_flow_date()
+    if latest is None:
+        return {"warning": "no_data", "row_count": len(sqlite.get_sector_fund_flow())}
+
+    df = sqlite.get_sector_fund_flow(date=latest)
+    if df is None or df.empty:
+        return {"warning": "empty_day", "latest": latest}
+
+    if "main_net_inflow" not in df.columns:
+        df["main_net_inflow"] = None
+    df = df.copy()
+    df["name"] = df["sector_code"].map(lambda c: get_sector_name(c))
+    valid = df.dropna(subset=["main_net_inflow"])
+    if valid.empty:
+        return {"warning": "no_valid", "latest": latest}
+
+    df = valid.sort_values("main_net_inflow", ascending=False)
+    top_in = df.head(10)
+    top_out = df.tail(10).sort_values("main_net_inflow")
+
+    fig_in = go.Figure()
+    fig_in.add_trace(go.Bar(
+        x=top_in["main_net_inflow"], y=top_in["name"], orientation="h",
+        marker_color="#d4380d",
+        text=top_in["main_net_inflow"].map(lambda v: f"{v:+.1f}亿"), textposition="auto",
+    ))
+    fig_in.update_layout(
+        height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+        xaxis_title="主力净流入（亿元）", yaxis={"autorange": "reversed"},
+    )
+
+    fig_out = go.Figure()
+    fig_out.add_trace(go.Bar(
+        x=top_out["main_net_inflow"], y=top_out["name"], orientation="h",
+        marker_color="#389e0d",
+        text=top_out["main_net_inflow"].map(lambda v: f"{v:+.1f}亿"), textposition="auto",
+    ))
+    fig_out.update_layout(
+        height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
+        xaxis_title="主力净流入（亿元）", yaxis={"autorange": "reversed"},
+    )
+
+    return {"latest": latest, "fig_in": fig_in, "fig_out": fig_out}
+
+
 def _render_fund_flow_map():
     """资金流向地图：展示当日行业真实主力资金流净流入/净流出排名（来自每日管线落盘）。"""
     st.subheader("资金流向地图")
@@ -157,64 +206,35 @@ def _render_fund_flow_map():
         "🔴 红 = 净流入（资金涌入），🟢 绿 = 净流出（资金撤离）。"
     )
 
-    sqlite = SQLiteStore()
-    latest = sqlite.get_latest_fund_flow_date()
-    if latest is None:
-        ff_total = len(sqlite.get_sector_fund_flow())
+    result = _build_fund_flow_figures()
+    if result.get("warning") == "no_data":
         st.warning(
             "资金流数据尚未落盘。\n\n"
-            f"- `sector_fund_flow` 表当前行数：**{ff_total}**\n\n"
+            f"- `sector_fund_flow` 表当前行数：**{result.get('row_count', 0)}**\n\n"
             "请点击侧栏「🔄 手动刷新全部数据」运行完整管线（约 5–10 分钟，后台运行）。"
         )
         return
-    df = sqlite.get_sector_fund_flow(date=latest)
-    if df is None or df.empty:
-        st.warning(f"资金流表存在（最新日期 **{latest}**），但当日无记录。请重新运行手动刷新。")
+    if result.get("warning") == "empty_day":
+        st.warning(f"资金流表存在（最新日期 **{result['latest']}**），但当日无记录。请重新运行手动刷新。")
         return
-
-    if "main_net_inflow" not in df.columns:
-        df["main_net_inflow"] = None
-    df = df.copy()
-    df["name"] = df["sector_code"].map(lambda c: get_sector_name(c))
-    valid = df.dropna(subset=["main_net_inflow"])
-    if valid.empty:
+    if result.get("warning") == "no_valid":
         st.warning(
-            f"当日资金流无真实净流入数据（{latest}）。可能 AkShare 接口不可用且回退失败。"
+            f"当日资金流无真实净流入数据（{result['latest']}）。可能 AkShare 接口不可用且回退失败。"
             "请重新运行手动刷新，或在侧栏查看运行保障日志。"
         )
         return
 
-    df = valid.sort_values("main_net_inflow", ascending=False)
-    top_in = df.head(10)                              # 净流入最多
-    top_out = df.tail(10).sort_values("main_net_inflow")  # 净流出最多（升序，最弱在上）
+    latest = result["latest"]
+    fig_in = result["fig_in"]
+    fig_out = result["fig_out"]
 
     col1, col2 = st.columns(2)
     with col1:
         st.markdown(f"**净流入前列（{latest}，亿元）**")
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=top_in["main_net_inflow"], y=top_in["name"], orientation="h",
-            marker_color="#d4380d",
-            text=top_in["main_net_inflow"].map(lambda v: f"{v:+.1f}亿"), textposition="auto",
-        ))
-        fig.update_layout(
-            height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
-            xaxis_title="主力净流入（亿元）", yaxis={"autorange": "reversed"},
-        )
-        st.plotly_chart(fig, width="stretch")
+        st.plotly_chart(fig_in, width="stretch", key="fund_flow_in")
     with col2:
         st.markdown(f"**净流出前列（{latest}，亿元）**")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Bar(
-            x=top_out["main_net_inflow"], y=top_out["name"], orientation="h",
-            marker_color="#389e0d",
-            text=top_out["main_net_inflow"].map(lambda v: f"{v:+.1f}亿"), textposition="auto",
-        ))
-        fig2.update_layout(
-            height=320, margin={"l": 10, "r": 10, "t": 10, "b": 10},
-            xaxis_title="主力净流入（亿元）", yaxis={"autorange": "reversed"},
-        )
-        st.plotly_chart(fig2, width="stretch")
+        st.plotly_chart(fig_out, width="stretch", key="fund_flow_out")
 
 
 def _render_market_overview():

@@ -42,17 +42,15 @@ def load_mirror_data():
     return mirror_pairs
 
 
-def _render_sankey(mirror_pairs: list):
-    """渲染资金流向Sankey图"""
+@st.cache_data(ttl=3600)
+def _build_sankey_figure(mirror_pairs: list):
+    """构建镜像对资金迁移 Sankey 图（缓存，避免每次 tab 切换重算）。"""
     if not mirror_pairs:
-        st.info("暂无镜像对数据")
-        return
+        return {"empty": True}
 
-    # 构建节点和链接
-    # 源: 弱板块(④/⑦) -> 目标: 强板块(⑥/③)
     node_labels = []
     node_colors = []
-    node_map = {}  # label -> index
+    node_map = {}
 
     links_source = []
     links_target = []
@@ -67,7 +65,6 @@ def _render_sankey(mirror_pairs: list):
             if label not in node_map:
                 node_map[label] = len(node_labels)
                 node_labels.append(label)
-                # 弱板块红色系，强板块绿色系
                 if "④" in label or "⑦" in label:
                     node_colors.append("#F44336")
                 else:
@@ -107,8 +104,16 @@ def _render_sankey(mirror_pairs: list):
         font={"size": 16, "color": "black", "family": "Arial, sans-serif"},
         paper_bgcolor="white",
     )
+    return {"fig": fig}
 
-    st.plotly_chart(fig, width="stretch", key="mirror_sankey")
+
+def _render_sankey(mirror_pairs: list):
+    """渲染资金流向Sankey图"""
+    result = _build_sankey_figure(mirror_pairs)
+    if result.get("empty"):
+        st.info("暂无镜像对数据")
+        return
+    st.plotly_chart(result["fig"], width="stretch", key="mirror_sankey")
 
 
 def _render_mirror_table(mirror_pairs: list):
@@ -160,27 +165,19 @@ _STATE_FLOW_WEIGHT = {
 }
 
 
-def render_group_capital_path(state_df: pd.DataFrame):
-    """
-    板块组之间的资金迁移路径（跨组，含具体行业）：
-    四层 Sankey —— 流出行业 → 净流出板块组 → 净流入板块组 → 流入行业。
-    净资金流 = Σ 组内各板块状态的资金权重（见 _STATE_FLOW_WEIGHT）。
-    每个板块组只展开资金流最强的 Top N 行业，其余行业合并为「其他N行业」节点
-    （保证流量守恒、又不至于拥挤）。
-    """
-    TOP_N = 6  # 每组最多展开的领先行业数
+@st.cache_data(ttl=3600)
+def _build_group_capital_path_figure(state_df: pd.DataFrame):
+    """构建板块组资金迁移路径 Sankey 图（缓存，避免每次 tab 切换重算）。"""
+    TOP_N = 6
 
     def _ind_label(i: dict) -> str:
-        """行业节点标签：显示名称+代码+状态"""
         return f"{i['name']}\n{i['code']} ({i['state']})"
 
     if state_df is None or state_df.empty:
-        st.info("暂无板块状态数据，无法生成板块组资金迁移路径")
-        return
+        return {"warning": "no_state"}
 
-    # 1) 计算每个板块组、每个行业的净资金流
     group_net = {}
-    group_industries = {}  # group -> [{"name","code","state","net"}, ...]
+    group_industries = {}
     for gname, ginfo in SECTOR_GROUPS.items():
         codes = set(ginfo["level2_codes"])
         gdf = state_df[state_df["sector_code"].isin(codes)]
@@ -203,20 +200,16 @@ def render_group_capital_path(state_df: pd.DataFrame):
             })
 
     if not group_net:
-        st.info("当前无板块组数据")
-        return
+        return {"warning": "no_group"}
 
-    # 2) 拆为净流出组（弱）与净流入组（强）
-    sources = {g: -v for g, v in group_net.items() if v < 0}  # 流出量(正)
-    sinks = {g: v for g, v in group_net.items() if v > 0}       # 流入量(正)
+    sources = {g: -v for g, v in group_net.items() if v < 0}
+    sinks = {g: v for g, v in group_net.items() if v > 0}
 
     if not sources or not sinks:
-        st.info("当前没有同时出现『净流出板块组』与『净流入板块组』，无法绘制组间迁移路径")
-        return
+        return {"warning": "no_migration"}
 
-    total_out = sum(sources.values())  # = total_in
+    total_out = sum(sources.values())
 
-    # 3) 构建四层 Sankey 节点
     node_labels, node_colors, node_map = [], [], {}
     def add_node(label, color):
         if label not in node_map:
@@ -228,20 +221,16 @@ def render_group_capital_path(state_df: pd.DataFrame):
     out_groups = list(sources.keys())
     in_groups = list(sinks.keys())
 
-    # 流出行业（浅红）/ 流出组其余行业（浅粉）
     for g in out_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] < 0], key=lambda x: x["net"])
         for i in inds[:TOP_N]:
             add_node(_ind_label(i), "#EF9A9A")
         if len(inds) > TOP_N:
             add_node(f"{g}·其他{len(inds) - TOP_N}行业\n（净流出）", "#F8BBD0")
-    # 净流出板块组（深红）
     for g in out_groups:
         add_node(f"{g}\n（净流出）", "#F44336")
-    # 净流入板块组（深绿）
     for g in in_groups:
         add_node(f"{g}\n（净流入）", "#4CAF50")
-    # 流入行业（浅绿）/ 流入组其余行业（浅绿灰）
     for g in in_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
         for i in inds[:TOP_N]:
@@ -249,9 +238,7 @@ def render_group_capital_path(state_df: pd.DataFrame):
         if len(inds) > TOP_N:
             add_node(f"{g}·其他{len(inds) - TOP_N}行业\n（净流入）", "#C8E6C9")
 
-    # 4) 构建连线
     links_source, links_target, links_value, links_color = [], [], [], []
-    # 流出行业 → 净流出板块组
     for g in out_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] < 0], key=lambda x: x["net"])
         for i in inds[:TOP_N]:
@@ -265,7 +252,6 @@ def render_group_capital_path(state_df: pd.DataFrame):
             links_target.append(node_map[f"{g}\n（净流出）"])
             links_value.append(rv)
             links_color.append("rgba(244,67,54,0.25)")
-    # 净流出板块组 → 净流入板块组（按流入占比分配，保证守恒）
     for g_out, out_v in sources.items():
         for g_in, in_v in sinks.items():
             w = out_v * (in_v / total_out)
@@ -275,7 +261,6 @@ def render_group_capital_path(state_df: pd.DataFrame):
             links_target.append(node_map[f"{g_in}\n（净流入）"])
             links_value.append(w)
             links_color.append("rgba(255,152,0,0.3)")
-    # 净流入板块组 → 流入行业
     for g in in_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
         for i in inds[:TOP_N]:
@@ -290,7 +275,6 @@ def render_group_capital_path(state_df: pd.DataFrame):
             links_value.append(rv)
             links_color.append("rgba(76,175,80,0.25)")
 
-    # 5) 绘制
     n_ind_nodes = sum(
         (min(len([i for i in group_industries.get(g, []) if i["net"] < 0]), TOP_N)
          + (1 if len([i for i in group_industries.get(g, []) if i["net"] < 0]) > TOP_N else 0))
@@ -329,8 +313,26 @@ def render_group_capital_path(state_df: pd.DataFrame):
         font={"size": 12, "color": "black", "family": "Arial, sans-serif"},
         paper_bgcolor="white",
     )
-    st.plotly_chart(fig, width="stretch", key="group_capital_sankey")
+    return {"fig": fig}
 
+
+def render_group_capital_path(state_df: pd.DataFrame):
+    """
+    板块组之间的资金迁移路径（跨组，含具体行业）：
+    四层 Sankey —— 流出行业 → 净流出板块组 → 净流入板块组 → 流入行业。
+    """
+    result = _build_group_capital_path_figure(state_df)
+    if result.get("warning") == "no_state":
+        st.info("暂无板块状态数据，无法生成板块组资金迁移路径")
+        return
+    if result.get("warning") == "no_group":
+        st.info("当前无板块组数据")
+        return
+    if result.get("warning") == "no_migration":
+        st.info("当前没有同时出现『净流出板块组』与『净流入板块组』，无法绘制组间迁移路径")
+        return
+
+    st.plotly_chart(result["fig"], width="stretch", key="group_capital_sankey")
     st.caption(
         "四层结构：左/浅红=流出行业，左中/深红=净流出板块组，右中/深绿=净流入板块组，右/浅绿=流入行业；"
         "「其他N行业」= 该板块组内资金流其余行业的合计。连线粗细代表迁移强度。"
