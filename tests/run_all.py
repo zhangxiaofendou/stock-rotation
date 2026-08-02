@@ -33,6 +33,7 @@ SUITES = [
     ("诊断器有效性", "tests/selfcheck_diagnostics.py"),
     ("页面渲染冒烟", "tests/selfcheck_ui_smoke.py"),
     ("行情自动补全", "tests/selfcheck_lookup.py"),
+    ("持仓分析逻辑", "tests/selfcheck_portfolio_analysis.py"),
 ]
 
 

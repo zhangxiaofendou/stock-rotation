@@ -2,6 +2,7 @@
 
 from datetime import date
 
+import numpy as np
 import pandas as pd
 import streamlit as st
 
@@ -28,6 +29,101 @@ def _fmt_cny(value: float) -> str:
 def load_sector_states_for_portfolio() -> pd.DataFrame:
     """独立加载行业状态，避免持仓页依赖轮动页面模块及其 UI 导入链。"""
     return StateMachine(ParquetStore(), SQLiteStore()).calc_all_sectors_state()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_live_quotes_for_portfolio(codes: tuple[str, ...]) -> pd.DataFrame:
+    """读取当前持仓实时行情；失败返回空表，不把行情写入持仓账本。"""
+    from data.sources.eastmoney_source import EastMoneyLiveSource, _secid_of_stock
+
+    rows = []
+    source = EastMoneyLiveSource()
+    secids = [_secid_of_stock(code) for code in codes]
+    secids = [x for x in secids if x]
+    if not secids:
+        return pd.DataFrame(columns=["security_code", "market_price", "quote_source"])
+    for item in source.get_live_quote(secids, fields="f43,f57,f58,f127,f169,f170"):
+        code = str(item.get("f57") or "")
+        if not code:
+            continue
+        try:
+            raw = item.get("f43")
+            price = float(raw) / 100.0 if isinstance(raw, int) else float(raw)
+            rows.append({
+                "security_code": code,
+                "market_price": price,
+                "quote_name": str(item.get("f58") or ""),
+                "quote_sector_name": str(item.get("f127") or "") or None,
+                "quote_pct": (float(item.get("f170")) / 100.0 if item.get("f170") is not None else np.nan),
+                "quote_source": "eastmoney_realtime",
+            })
+        except (TypeError, ValueError):
+            continue
+    return pd.DataFrame(rows)
+
+
+def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, states: pd.DataFrame) -> pd.DataFrame:
+    """合并成本、实时行情、行业状态，生成左侧交易者的条件式建议。"""
+    if positions.empty:
+        return pd.DataFrame()
+    df = positions.copy()
+    if quotes is not None and not quotes.empty:
+        df = df.merge(quotes, on="security_code", how="left")
+    else:
+        df["market_price"] = np.nan
+        df["quote_pct"] = np.nan
+        df["quote_source"] = None
+    df["market_value"] = df["quantity"] * df["market_price"]
+    df["profit_amount"] = (df["market_price"] - df["avg_cost"]) * df["quantity"]
+    df["profit_pct"] = (df["market_price"] / df["avg_cost"] - 1.0) * 100.0
+
+    state_map = {}
+    if states is not None and not states.empty:
+        for row in states.to_dict("records"):
+            code = str(row.get("sector_code") or "")
+            name = str(row.get("sector_name") or "")
+            payload = {"state": row.get("state"), "trend": row.get("trend"), "date": str(row.get("date", ""))[:10]}
+            if code:
+                state_map["code:" + code] = payload
+            if name:
+                state_map["name:" + name] = payload
+
+    risk_states = {"①领涨减速", "③加速冲顶", "④强转弱", "⑦持续杀跌", "⑧下跌中继"}
+    weak_states = {"④强转弱", "⑦持续杀跌", "⑧下跌中继"}
+    action_rank = {"尽快决策": 0, "优先复核": 1, "左侧观察": 2, "持有观望": 3, "数据不足": 4}
+    rows = []
+    for row in df.to_dict("records"):
+        sector_code = str(row.get("sector_code") or "")
+        sector_name = str(row.get("sector_name") or row.get("quote_sector_name") or "")
+        state_info = state_map.get("code:" + sector_code) or state_map.get("name:" + sector_name)
+        state = state_info.get("state") if state_info else None
+        profit_pct = row.get("profit_pct")
+        stop_loss = row.get("stop_loss")
+        if not state_info:
+            priority, action, reason = "数据不足", "补充行业映射 / 等待数据", "缺少可关联的板块状态，不对持仓方向做推断。"
+        elif state in weak_states and pd.notna(profit_pct) and float(profit_pct) < -8:
+            priority, action, reason = "尽快决策", "复核逻辑，暂不盲目补仓", f"行业处于{state}，且当前浮亏 {float(profit_pct):.1f}%；左侧交易也要先确认逻辑未破坏。"
+        elif state in weak_states:
+            priority, action, reason = "优先复核", "观察板块止跌信号", f"行业处于{state}；左侧策略可观察，但不在板块转弱阶段主动摊低成本。"
+        elif state in {"⑨底背离", "⑥弱转强"}:
+            priority, action, reason = "左侧观察", "分批观察，不追涨", f"行业出现{state}修复信号；左侧交易以试错仓和回踩承接为主，等待板块状态继续改善。"
+        elif state in risk_states:
+            priority, action, reason = "优先复核", "持有但不加仓", f"行业状态为{state}，暂不适合追高加仓。"
+        else:
+            priority, action, reason = "持有观望", "持有观望", f"行业状态为{state}，当前没有触发高优先级复核条件。"
+        if pd.notna(stop_loss) and pd.notna(row.get("market_price")) and float(row["market_price"]) <= float(stop_loss):
+            priority, action, reason = "尽快决策", "核验止损条件", f"实时价已触及/低于预设止损价 {float(stop_loss):.2f}，请结合个股逻辑和成交情况核验。"
+        rows.append({
+            **row,
+            "sector_state": state or "—",
+            "state_date": state_info.get("date") if state_info else "",
+            "priority": priority,
+            "action": action,
+            "reason": reason,
+        })
+    out = pd.DataFrame(rows)
+    out["_rank"] = out["priority"].map(action_rank).fillna(9)
+    return out.sort_values(["_rank", "security_code"]).drop(columns=["_rank"]).reset_index(drop=True)
 
 
 def _render_record_form(service: PortfolioHoldings):
@@ -150,37 +246,86 @@ def _render_positions(service: PortfolioHoldings):
     summary = service.summary()
     positions = service.positions()
 
-    st.subheader("我的持仓")
-    render_src_badge("derived", base=["user"])
-    st.caption("当前为成本口径账本：市值、浮盈亏和组合建议将在行情与风险模块接入后补齐。")
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("持仓标的", f"{summary['position_count']} 只")
-    c2.metric("成本金额", _fmt_cny(summary["total_cost"]))
-    c3.metric("覆盖行业", f"{summary['sector_count']} 个")
-    c4.metric("最大单一成本", _fmt_cny(summary["largest_position_cost"]))
-
+    st.subheader("我的持仓与收益")
+    render_src_badge("derived", base=["user", "eastmoney_realtime"])
     if positions.empty:
         st.info("暂无持仓记录。可通过下方“记录实际操作”录入首笔买入。")
-        return
+        return positions, pd.DataFrame()
 
-    display = positions.copy()
-    display["目标仓位"] = display["target_weight"].map(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
-    display["止损价"] = display["stop_loss"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
-    display = display.rename(columns={
+    quotes = load_live_quotes_for_portfolio(tuple(positions["security_code"].astype(str).tolist()))
+    display = positions.merge(quotes, on="security_code", how="left") if not quotes.empty else positions.copy()
+    if "market_price" not in display:
+        display["market_price"] = np.nan
+    display["market_value"] = display["quantity"] * display["market_price"]
+    display["profit_amount"] = (display["market_price"] - display["avg_cost"]) * display["quantity"]
+    display["profit_pct"] = (display["market_price"] / display["avg_cost"] - 1.0) * 100.0
+    has_quote = display["market_value"].notna()
+    total_market = float(display.loc[has_quote, "market_value"].sum()) if has_quote.any() else None
+    total_profit = float(display.loc[has_quote, "profit_amount"].sum()) if has_quote.any() else None
+    cost_amount = float(display["cost_amount"].sum())
+    profit_pct = total_profit / cost_amount * 100 if total_profit is not None and cost_amount else None
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("持仓标的", f"{summary['position_count']} 只")
+    c2.metric("成本金额", _fmt_cny(cost_amount))
+    c3.metric("当前市值", _fmt_cny(total_market) if total_market is not None else "暂无行情")
+    c4.metric("浮盈亏", _fmt_cny(total_profit) if total_profit is not None else "暂无行情", f"{profit_pct:+.2f}%" if profit_pct is not None else None)
+    c5.metric("覆盖行业", f"{summary['sector_count']} 个")
+    st.caption("成本和成交来自你的持仓账本；现价、浮盈亏来自公共实时行情快照，行情获取失败时不替代真实成交数据。")
+
+    table = display.copy()
+    table["现价"] = table["market_price"].map(lambda x: f"¥{x:,.2f}" if pd.notna(x) else "暂无")
+    table["浮盈亏"] = table["profit_amount"].map(lambda x: f"¥{x:,.2f}" if pd.notna(x) else "暂无")
+    table["收益率"] = table["profit_pct"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "暂无")
+    table["目标仓位"] = table["target_weight"].map(lambda x: f"{x:.1%}" if pd.notna(x) else "—")
+    table["止损价"] = table["stop_loss"].map(lambda x: f"{x:.2f}" if pd.notna(x) else "—")
+    table = table.rename(columns={
         "security_code": "代码", "security_name": "名称", "asset_type": "类型",
         "sector_name": "所属行业", "quantity": "持仓数量", "avg_cost": "平均成本",
         "cost_amount": "成本金额", "opened_date": "首次建仓日", "note": "备注",
     })
     st.dataframe(
-        display[["代码", "名称", "类型", "所属行业", "持仓数量", "平均成本", "成本金额", "目标仓位", "止损价", "首次建仓日", "备注"]],
-        hide_index=True,
-        width="stretch",
+        table[["代码", "名称", "类型", "所属行业", "持仓数量", "平均成本", "现价", "成本金额", "浮盈亏", "收益率", "目标仓位", "止损价", "首次建仓日", "备注"]],
+        hide_index=True, width="stretch",
         column_config={
             "平均成本": st.column_config.NumberColumn(format="¥%.4f"),
             "成本金额": st.column_config.NumberColumn(format="¥%.2f"),
             "持仓数量": st.column_config.NumberColumn(format="%.4f"),
         },
     )
+    return positions, quotes
+
+
+def _render_position_analysis(service: PortfolioHoldings, positions: pd.DataFrame, quotes: pd.DataFrame):
+    st.subheader("持仓分析与决策优先级")
+    render_src_badge("derived", base=["user", "eastmoney_realtime", "sector_state"])
+    if positions.empty:
+        st.info("录入持仓后，这里会按每只股票的板块状态、浮盈亏和止损条件生成左侧交易建议。")
+        return
+    try:
+        states = load_sector_states_for_portfolio()
+    except Exception:
+        states = pd.DataFrame()
+    analysis = _build_position_analysis(positions, quotes, states)
+    st.caption("排序原则：需要尽快决策的在前；左侧观察与持有观望在后。建议只给条件化复核，不替代你的交易决定，也不把右侧追涨逻辑套用到左侧交易。")
+    urgent = int((analysis["priority"] == "尽快决策").sum())
+    review = int((analysis["priority"] == "优先复核").sum())
+    observe = int((analysis["priority"].isin(["左侧观察", "持有观望"])).sum())
+    c1, c2, c3 = st.columns(3)
+    c1.metric("尽快决策", f"{urgent} 只")
+    c2.metric("优先复核", f"{review} 只")
+    c3.metric("观察/持有", f"{observe} 只")
+    view = analysis[["priority", "security_code", "security_name", "sector_name", "sector_state", "market_price", "profit_pct", "action", "reason"]].copy()
+    view = view.rename(columns={
+        "priority": "优先级", "security_code": "代码", "security_name": "名称", "sector_name": "所属行业",
+        "sector_state": "板块状态", "market_price": "现价", "profit_pct": "收益率", "action": "建议动作", "reason": "分析依据",
+    })
+    view["现价"] = view["现价"].map(lambda x: f"¥{x:,.2f}" if pd.notna(x) else "暂无")
+    view["收益率"] = view["收益率"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "暂无")
+    st.dataframe(view, hide_index=True, width="stretch", column_config={
+        "分析依据": st.column_config.TextColumn(width="large"),
+        "建议动作": st.column_config.TextColumn(width="medium"),
+    })
 
 
 def _render_pending_items(service: PortfolioHoldings):
@@ -256,7 +401,9 @@ def render():
         return
     service = get_holdings_service(user_id=user_id)
     st.info(f"👤 当前账户：**{user_id}**（仅显示你自己的持仓）")
-    _render_positions(service)
+    positions, quotes = _render_positions(service)
+    st.markdown("---")
+    _render_position_analysis(service, positions, quotes)
     _render_record_form(service)
     st.markdown("---")
     _render_pending_items(service)
