@@ -405,27 +405,33 @@ def _render_pending_items(service: PortfolioHoldings):
 
 
 def _render_transactions(service: PortfolioHoldings):
-    st.subheader("操作日志")
+    st.subheader("逐笔操作记录")
     render_src_badge("derived", base=["user"])
+    st.caption("同一标的的多次操作会自动聚合；修改或删除流水后，当前持仓会重新计算。")
     transactions = service.transactions()
     if transactions.empty:
         st.caption("暂无实际操作记录。")
         return
-    display = transactions.rename(columns={
-        "trade_date": "日期", "security_code": "代码", "security_name": "名称",
-        "side": "操作", "quantity": "数量", "price": "价格", "fee": "费用", "note": "备注",
-    })
-    display["操作"] = display["操作"].map({"BUY": "买入", "SELL": "卖出", "ADJUST": "调账"})
-    st.dataframe(
-        display[["日期", "代码", "名称", "操作", "数量", "价格", "费用", "备注"]],
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "价格": st.column_config.NumberColumn(format="¥%.4f"),
-            "费用": st.column_config.NumberColumn(format="¥%.2f"),
-            "数量": st.column_config.NumberColumn(format="%.4f"),
-        },
-    )
+    for code, group in transactions.groupby("security_code", sort=False):
+        with st.expander(f"{code} · {group.iloc[0]['security_name']}（{len(group)} 笔）"):
+            for _, row in group.iterrows():
+                tid = int(row["id"]); st.write(f"{row['trade_date']}｜{'买入' if row['side']=='BUY' else '卖出' if row['side']=='SELL' else '调账'}｜数量 {row['quantity']:g}｜价格 ¥{row['price']:.4f}")
+                c1, c2 = st.columns(2)
+                with c1:
+                    with st.form(f"edit_tx_{tid}"):
+                        nd = st.date_input("日期", value=pd.to_datetime(row["trade_date"]).date())
+                        ns = st.selectbox("操作", ["BUY", "SELL", "ADJUST"], index=["BUY", "SELL", "ADJUST"].index(row["side"]), format_func={"BUY":"买入", "SELL":"卖出", "ADJUST":"调账"}.get)
+                        nq = st.number_input("数量", min_value=0.0001, value=float(row["quantity"]), format="%.4f")
+                        np = st.number_input("价格", min_value=0.0, value=float(row["price"]), format="%.4f")
+                        nf = st.number_input("费用", min_value=0.0, value=float(row["fee"]), format="%.2f")
+                        nn = st.text_area("备注", value=row["note"] or "")
+                        if st.form_submit_button("保存修改", type="primary"):
+                            try: service.update_transaction(tid, trade_date=nd.isoformat(), side=ns, quantity=nq, price=np, fee=nf, note=nn or None); st.success("已修改并重新聚合"); st.rerun()
+                            except Exception as exc: st.error(f"修改失败：{exc}")
+                with c2:
+                    if st.button("删除这笔记录", key=f"delete_tx_{tid}"):
+                        try: service.delete_transaction(tid); st.success("已删除并重新聚合"); st.rerun()
+                        except Exception as exc: st.error(f"删除失败：{exc}")
 
 
 def render():

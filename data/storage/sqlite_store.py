@@ -1001,6 +1001,63 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    def _rebuild_portfolio_position(self, conn: sqlite3.Connection, user_id: str, security_code: str) -> None:
+        rows = conn.execute("SELECT * FROM portfolio_transactions WHERE user_id = ? AND security_code = ? ORDER BY id", (str(user_id), str(security_code))).fetchall()
+        old = conn.execute("SELECT * FROM portfolio_positions WHERE user_id = ? AND security_code = ?", (str(user_id), str(security_code))).fetchone()
+        qty, cost_amount, opened_date, last_name = 0.0, 0.0, None, None
+        for row in rows:
+            side, q, price, fee = str(row["side"]).upper(), float(row["quantity"]), float(row["price"]), float(row["fee"])
+            if side == "BUY":
+                qty += q; cost_amount += q * price + fee; opened_date = opened_date or row["trade_date"]
+            elif side == "SELL":
+                if q > qty + 1e-8: raise ValueError(f"流水重算失败：{security_code} 卖出数量超过累计买入")
+                avg = cost_amount / qty if qty > 1e-8 else 0.0; qty -= q; cost_amount = qty * avg
+            elif side == "ADJUST": qty = q
+            last_name = row["security_name"] or last_name
+        conn.execute("DELETE FROM portfolio_positions WHERE user_id = ? AND security_code = ?", (str(user_id), str(security_code)))
+        if qty <= 1e-8: return
+        conn.execute("""INSERT INTO portfolio_positions
+            (user_id, security_code, security_name, asset_type, sector_code, sector_name, quantity, avg_cost,
+             opened_date, target_weight, stop_loss, note, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))""",
+            (str(user_id), str(security_code), last_name or (old["security_name"] if old else security_code),
+             old["asset_type"] if old else "stock", old["sector_code"] if old else None, old["sector_name"] if old else None,
+             qty, cost_amount / qty if qty else 0.0, opened_date or (old["opened_date"] if old else None),
+             old["target_weight"] if old else None, old["stop_loss"] if old else None, old["note"] if old else None))
+
+    def update_portfolio_transaction(self, transaction_id: int, user_id: str = "", **fields) -> None:
+        allowed = {"trade_date", "security_code", "security_name", "side", "quantity", "price", "fee", "note"}
+        updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates: raise ValueError("没有可修改的流水字段")
+        if "side" in updates and str(updates["side"]).upper() not in {"BUY", "SELL", "ADJUST"}: raise ValueError("操作必须是 BUY、SELL 或 ADJUST")
+        if "quantity" in updates and float(updates["quantity"]) <= 0: raise ValueError("数量必须大于 0")
+        if "price" in updates and float(updates["price"]) < 0: raise ValueError("价格不能为负数")
+        if "fee" in updates and float(updates["fee"]) < 0: raise ValueError("费用不能为负数")
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN")
+            before = conn.execute("SELECT security_code FROM portfolio_transactions WHERE id = ? AND user_id = ?", (int(transaction_id), str(user_id))).fetchone()
+            if not before: raise ValueError("找不到这笔操作记录")
+            old_code = before[0]; sets = ", ".join(f"{k} = ?" for k in updates)
+            conn.execute(f"UPDATE portfolio_transactions SET {sets} WHERE id = ? AND user_id = ?", tuple(updates.values()) + (int(transaction_id), str(user_id)))
+            new_code = updates.get("security_code", old_code)
+            self._rebuild_portfolio_position(conn, user_id, old_code)
+            if new_code != old_code: self._rebuild_portfolio_position(conn, user_id, new_code)
+            conn.commit()
+        except Exception: conn.rollback(); raise
+        finally: conn.close()
+
+    def delete_portfolio_transaction(self, transaction_id: int, user_id: str = "") -> None:
+        conn = self._get_conn()
+        try:
+            conn.execute("BEGIN")
+            row = conn.execute("SELECT security_code FROM portfolio_transactions WHERE id = ? AND user_id = ?", (int(transaction_id), str(user_id))).fetchone()
+            if not row: raise ValueError("找不到这笔操作记录")
+            conn.execute("DELETE FROM portfolio_transactions WHERE id = ? AND user_id = ?", (int(transaction_id), str(user_id)))
+            self._rebuild_portfolio_position(conn, user_id, row[0]); conn.commit()
+        except Exception: conn.rollback(); raise
+        finally: conn.close()
+
     # ============================================================
     # 信号事件账本
     # ============================================================

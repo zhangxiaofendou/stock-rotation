@@ -100,6 +100,16 @@ class PortfolioHoldings:
             security_code=security_code, limit=limit, user_id=self.user_id
         )
 
+    def update_transaction(self, transaction_id: int, **fields) -> None:
+        if not self.user_id:
+            raise ValueError("持仓操作必须指定 user_id（当前用户未登录？）")
+        self.store.update_portfolio_transaction(int(transaction_id), user_id=self.user_id, **fields)
+
+    def delete_transaction(self, transaction_id: int) -> None:
+        if not self.user_id:
+            raise ValueError("持仓操作必须指定 user_id（当前用户未登录？）")
+        self.store.delete_portfolio_transaction(int(transaction_id), user_id=self.user_id)
+
     def summary(self) -> dict:
         """仅按成本统计当前账本概览；市值、浮盈亏需由行情层后续补全。"""
         positions = self.positions()

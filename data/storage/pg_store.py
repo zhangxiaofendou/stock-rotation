@@ -396,6 +396,54 @@ class PGStore:
         finally:
             conn.close()
 
+    def _rebuild_portfolio_position(self, conn, user_id: str, security_code: str) -> None:
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM portfolio_transactions WHERE user_id = %s AND security_code = %s ORDER BY id", (str(user_id), str(security_code)))
+            rows = cur.fetchall(); cur.execute("SELECT * FROM portfolio_positions WHERE user_id = %s AND security_code = %s", (str(user_id), str(security_code)))
+            old = cur.fetchone(); qty, cost_amount, opened_date, last_name = 0.0, 0.0, None, None
+            for row in rows:
+                side, q, price, fee = str(row[4]).upper(), float(row[5]), float(row[6]), float(row[7])
+                if side == "BUY": qty += q; cost_amount += q * price + fee; opened_date = opened_date or row[1]
+                elif side == "SELL":
+                    if q > qty + 1e-8: raise ValueError(f"流水重算失败：{security_code} 卖出数量超过累计买入")
+                    avg = cost_amount / qty if qty > 1e-8 else 0.0; qty -= q; cost_amount = qty * avg
+                elif side == "ADJUST": qty = q
+                last_name = row[3] or last_name
+            cur.execute("DELETE FROM portfolio_positions WHERE user_id = %s AND security_code = %s", (str(user_id), str(security_code)))
+            if qty <= 1e-8: return
+            cur.execute("""INSERT INTO portfolio_positions
+                (user_id, security_code, security_name, asset_type, sector_code, sector_name, quantity, avg_cost, opened_date, target_weight, stop_loss, note, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))""",
+                (str(user_id), str(security_code), last_name or (old[2] if old else security_code), old[3] if old else "stock", old[4] if old else None, old[5] if old else None, qty, cost_amount / qty if qty else 0.0, opened_date or (old[8] if old else None), old[9] if old else None, old[10] if old else None, old[11] if old else None))
+
+    def update_portfolio_transaction(self, transaction_id: int, user_id: str = "", **fields) -> None:
+        allowed = {"trade_date", "security_code", "security_name", "side", "quantity", "price", "fee", "note"}; updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
+        if not updates: raise ValueError("没有可修改的流水字段")
+        if "side" in updates and str(updates["side"]).upper() not in {"BUY", "SELL", "ADJUST"}: raise ValueError("操作必须是 BUY、SELL 或 ADJUST")
+        if "quantity" in updates and float(updates["quantity"]) <= 0: raise ValueError("数量必须大于 0")
+        conn = connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT security_code FROM portfolio_transactions WHERE id = %s AND user_id = %s", (int(transaction_id), str(user_id))); before = cur.fetchone()
+                if not before: raise ValueError("找不到这笔操作记录")
+                old_code = before[0]; sets = ", ".join(f"{k} = %s" for k in updates); cur.execute(f"UPDATE portfolio_transactions SET {sets} WHERE id = %s AND user_id = %s", tuple(updates.values()) + (int(transaction_id), str(user_id)))
+                new_code = updates.get("security_code", old_code); self._rebuild_portfolio_position(conn, user_id, old_code)
+                if new_code != old_code: self._rebuild_portfolio_position(conn, user_id, new_code)
+            conn.commit()
+        except Exception: conn.rollback(); raise
+        finally: conn.close()
+
+    def delete_portfolio_transaction(self, transaction_id: int, user_id: str = "") -> None:
+        conn = connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT security_code FROM portfolio_transactions WHERE id = %s AND user_id = %s", (int(transaction_id), str(user_id))); row = cur.fetchone()
+                if not row: raise ValueError("找不到这笔操作记录")
+                cur.execute("DELETE FROM portfolio_transactions WHERE id = %s AND user_id = %s", (int(transaction_id), str(user_id))); self._rebuild_portfolio_position(conn, user_id, row[0])
+            conn.commit()
+        except Exception: conn.rollback(); raise
+        finally: conn.close()
+
     # -------- 写 --------
     def record_portfolio_transaction(
         self,
