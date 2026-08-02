@@ -13,10 +13,15 @@ from data.storage.sqlite_store import SQLiteStore
 
 
 class PortfolioHoldings:
-    """真实持仓与操作日志的应用服务。"""
+    """真实持仓与操作日志的应用服务。
 
-    def __init__(self, store: Optional[SQLiteStore] = None):
+    user_id 标识持仓所有者；传入后所有读写均按该用户隔离，确保不同使用者
+    的仓位互不串读、互不可见。
+    """
+
+    def __init__(self, store: Optional[SQLiteStore] = None, user_id: str = ""):
         self.store = store or SQLiteStore()
+        self.user_id = str(user_id)
 
     def record_trade(
         self,
@@ -37,6 +42,8 @@ class PortfolioHoldings:
         """记录一笔用户实际操作，并同步当前头寸。"""
         if not security_code or not security_name:
             raise ValueError("证券代码和证券名称不能为空")
+        if not self.user_id:
+            raise ValueError("持仓操作必须指定 user_id（当前用户未登录？）")
         self.store.record_portfolio_transaction(
             trade_date=trade_date or date.today().isoformat(),
             security_code=str(security_code).strip(),
@@ -51,11 +58,12 @@ class PortfolioHoldings:
             sector_name=sector_name or None,
             target_weight=target_weight,
             stop_loss=stop_loss,
+            user_id=self.user_id,
         )
 
     def positions(self) -> pd.DataFrame:
-        """返回当前持仓，追加成本金额列以便页面汇总。"""
-        df = self.store.get_portfolio_positions()
+        """返回当前用户的持仓，追加成本金额列以便页面汇总。"""
+        df = self.store.get_portfolio_positions(user_id=self.user_id)
         if df.empty:
             return df
         df = df.copy()
@@ -63,8 +71,10 @@ class PortfolioHoldings:
         return df
 
     def transactions(self, security_code: str = None, limit: int = 200) -> pd.DataFrame:
-        """返回成交/调账日志。"""
-        return self.store.get_portfolio_transactions(security_code=security_code, limit=limit)
+        """返回当前用户的成交/调账日志。"""
+        return self.store.get_portfolio_transactions(
+            security_code=security_code, limit=limit, user_id=self.user_id
+        )
 
     def summary(self) -> dict:
         """仅按成本统计当前账本概览；市值、浮盈亏需由行情层后续补全。"""

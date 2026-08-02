@@ -205,10 +205,11 @@ def _gather_market(sm: StateMachine, cb: CircuitBreaker, sc: SectorScoring, as_o
 
 
 def _gather_holdings(sm: StateMachine, as_of_date: str,
-                     state_df: Optional[pd.DataFrame] = None) -> Dict[str, Any]:
+                     state_df: Optional[pd.DataFrame] = None,
+                     user_id: str = "") -> Dict[str, Any]:
     out: Dict[str, Any] = {"ok": False, "position_count": 0}
     try:
-        holdings = PortfolioHoldings()
+        holdings = PortfolioHoldings(user_id=user_id)
         summary = holdings.summary()
         positions = holdings.positions()
         # 行业状态映射
@@ -686,10 +687,12 @@ def _build_html(r: Dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 # 公开入口
 # ---------------------------------------------------------------------------
-def generate_report(as_of_date: Optional[str] = None) -> Dict[str, Any]:
+def generate_report(as_of_date: Optional[str] = None,
+                     user_id: str = "") -> Dict[str, Any]:
     """生成并归档当日盘后报告。
 
     返回 dict：as_of_date / html_path / meta_path / html / report。
+    user_id 用于隔离不同使用者的持仓汇总（多用户场景）。
     """
     sm = StateMachine(ParquetStore(), SQLiteStore())
     sqlite = SQLiteStore()
@@ -724,7 +727,7 @@ def generate_report(as_of_date: Optional[str] = None) -> Dict[str, Any]:
     report = {
         "meta": meta,
         "market": _gather_market(sm, cb, sc, as_of_date, state_df=state_df, market_status=market_status),
-        "holdings": _gather_holdings(sm, as_of_date, state_df=state_df),
+        "holdings": _gather_holdings(sm, as_of_date, state_df=state_df, user_id=user_id),
         "transitions": _gather_transitions(sqlite, as_of_date),
         "mirrors": _gather_mirrors(mp, as_of_date),
         "advice": _gather_advice(sm, as_of_date, state_df=state_df),

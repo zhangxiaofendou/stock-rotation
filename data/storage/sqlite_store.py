@@ -145,8 +145,10 @@ CREATE TABLE IF NOT EXISTS signal_performance (
 
 -- 用户持仓：仅保存当前仍持有的真实头寸；成交明细保存在 portfolio_transactions。
 -- 平均成本由成交服务按买入加权计算，卖出不改变剩余头寸成本。
+-- 多用户：user_id 标识持仓所有者，(user_id, security_code) 为唯一持仓。
 CREATE TABLE IF NOT EXISTS portfolio_positions (
-    security_code TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL DEFAULT '',
+    security_code TEXT NOT NULL,
     security_name TEXT NOT NULL,
     asset_type TEXT NOT NULL DEFAULT 'stock',
     sector_code TEXT,
@@ -158,12 +160,15 @@ CREATE TABLE IF NOT EXISTS portfolio_positions (
     stop_loss REAL,
     note TEXT,
     created_at TEXT DEFAULT (datetime('now', 'localtime')),
-    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+    PRIMARY KEY (user_id, security_code)
 );
 
 -- 用户实际成交/调账日志：不被重算或覆盖，作为持仓事实的审计来源。
+-- 多用户：user_id 标识成交所有者，与持仓一一对应。
 CREATE TABLE IF NOT EXISTS portfolio_transactions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT '',
     trade_date TEXT NOT NULL,
     security_code TEXT NOT NULL,
     security_name TEXT NOT NULL,
@@ -261,12 +266,92 @@ class SQLiteStore:
                     "ALTER TABLE sector_fund_flow ADD COLUMN main_net_inflow REAL"
                 )
                 logger.info("迁移：sector_fund_flow 已增加 main_net_inflow 列")
+            # 迁移：持仓表支持多用户（user_id 列 + 复合主键）
+            self._migrate_portfolio_user_scoping(conn)
             conn.commit()
             conn.close()
             logger.info(f"SQLite 数据库初始化完成: {self.db_path}")
         except Exception as e:
             logger.error(f"数据库初始化失败: {e}")
             raise
+
+    def _migrate_portfolio_user_scoping(self, conn: sqlite3.Connection) -> None:
+        """将持仓表从单用户（security_code 主键）迁移到多用户（(user_id, security_code) 主键）。
+
+        旧库已存在时：先补 user_id 列，再把主键改为复合主键（重建表并搬运数据）。
+        全新库（CREATE_TABLES_SQL 已是新结构）则跳过。
+        """
+        # positions 表
+        p_cols = [r[1] for r in conn.execute("PRAGMA table_info(portfolio_positions)")]
+        if "user_id" not in p_cols:
+            conn.execute(
+                "ALTER TABLE portfolio_positions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
+            )
+        # 注意：SQLite 的 ALTER ADD COLUMN 会改写 sqlite_master 中的建表语句，
+        # 因此不能靠「建表语句是否含 user_id」判断，必须看 user_id 是否已是主键一部分。
+        user_row = conn.execute(
+            "SELECT pk FROM pragma_table_info('portfolio_positions') WHERE name='user_id'"
+        ).fetchone()
+        is_user_scoped = bool(user_row and user_row[0] and user_row[0] > 0)
+        if not is_user_scoped:
+            # 旧结构仍只有 security_code 主键，重建为复合主键
+            conn.execute("ALTER TABLE portfolio_positions RENAME TO portfolio_positions_old")
+            conn.execute(
+                """
+                CREATE TABLE portfolio_positions (
+                    user_id TEXT NOT NULL DEFAULT '',
+                    security_code TEXT NOT NULL,
+                    security_name TEXT NOT NULL,
+                    asset_type TEXT NOT NULL DEFAULT 'stock',
+                    sector_code TEXT,
+                    sector_name TEXT,
+                    quantity REAL NOT NULL CHECK(quantity > 0),
+                    avg_cost REAL NOT NULL CHECK(avg_cost >= 0),
+                    opened_date TEXT,
+                    target_weight REAL,
+                    stop_loss REAL,
+                    note TEXT,
+                    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    updated_at TEXT DEFAULT (datetime('now', 'localtime')),
+                    PRIMARY KEY (user_id, security_code)
+                )
+                """
+            )
+            # 旧表列可能不完全（不同历史版本），按存在性逐列回退，避免 SELECT 引用不存在的列
+            src_cols = {r[1] for r in conn.execute("PRAGMA table_info(portfolio_positions_old)")}
+            def _col(name: str, fallback: str) -> str:
+                return name if name in src_cols else fallback
+            conn.execute(
+                f"""
+                INSERT INTO portfolio_positions
+                    (user_id, security_code, security_name, asset_type, sector_code, sector_name,
+                     quantity, avg_cost, opened_date, target_weight, stop_loss, note, created_at, updated_at)
+                SELECT
+                    COALESCE(user_id, ''),
+                    {_col('security_code', 'security_code')},
+                    {_col('security_name', "''")},
+                    {_col('asset_type', "'stock'")},
+                    {_col('sector_code', 'NULL')},
+                    {_col('sector_name', 'NULL')},
+                    {_col('quantity', 'quantity')},
+                    {_col('avg_cost', 'avg_cost')},
+                    {_col('opened_date', 'NULL')},
+                    {_col('target_weight', 'NULL')},
+                    {_col('stop_loss', 'NULL')},
+                    {_col('note', 'NULL')},
+                    datetime('now', 'localtime'),
+                    datetime('now', 'localtime')
+                FROM portfolio_positions_old
+                """
+            )
+            conn.execute("DROP TABLE portfolio_positions_old")
+            logger.info("迁移：portfolio_positions 已升级为多用户复合主键")
+        # transactions 表
+        t_cols = [r[1] for r in conn.execute("PRAGMA table_info(portfolio_transactions)")]
+        if "user_id" not in t_cols:
+            conn.execute(
+                "ALTER TABLE portfolio_transactions ADD COLUMN user_id TEXT NOT NULL DEFAULT ''"
+            )
 
     def ensure_sectors(self) -> int:
         """从本地 sector_map 初始化 sectors 表（幂等）。
@@ -754,25 +839,27 @@ class SQLiteStore:
     # ============================================================
     # 用户持仓账本
     # ============================================================
-    def get_portfolio_positions(self) -> pd.DataFrame:
-        """返回当前持仓，按创建时间倒序。"""
+    def get_portfolio_positions(self, user_id: str = "") -> pd.DataFrame:
+        """返回某用户的当前持仓，按更新时间倒序。user_id 为空表示未归属（旧数据）。"""
         conn = self._get_conn()
         try:
             return pd.read_sql_query(
-                "SELECT * FROM portfolio_positions ORDER BY updated_at DESC, security_code",
+                "SELECT * FROM portfolio_positions WHERE user_id = ? ORDER BY updated_at DESC, security_code",
                 conn,
+                params=[str(user_id)],
             )
         finally:
             conn.close()
 
-    def get_portfolio_transactions(self, security_code: str = None, limit: int = 200) -> pd.DataFrame:
-        """返回真实操作日志；可按证券代码筛选。"""
+    def get_portfolio_transactions(self, security_code: str = None, limit: int = 200,
+                                   user_id: str = "") -> pd.DataFrame:
+        """返回某用户的真实操作日志；可按证券代码筛选。"""
         conn = self._get_conn()
         try:
-            sql = "SELECT * FROM portfolio_transactions"
-            params = []
+            sql = "SELECT * FROM portfolio_transactions WHERE user_id = ?"
+            params = [str(user_id)]
             if security_code:
-                sql += " WHERE security_code = ?"
+                sql += " AND security_code = ?"
                 params.append(security_code)
             sql += " ORDER BY trade_date DESC, id DESC LIMIT ?"
             params.append(int(limit))
@@ -795,11 +882,13 @@ class SQLiteStore:
         sector_name: str = None,
         target_weight: float = None,
         stop_loss: float = None,
+        user_id: str = "",
     ) -> None:
         """原子记录一笔实际成交并更新当前持仓。
 
         BUY 按成交金额（含费用）更新加权平均成本；SELL 只减少数量；ADJUST
         用于数量调整且不改变成本。卖出超过持仓会拒绝，避免账本出现负数。
+        所有读写按 user_id 隔离，确保不同使用者的仓位互不可见。
         """
         side = str(side).upper()
         if side not in {"BUY", "SELL", "ADJUST"}:
@@ -807,13 +896,14 @@ class SQLiteStore:
         quantity, price, fee = float(quantity), float(price), float(fee)
         if quantity <= 0 or price < 0 or fee < 0:
             raise ValueError("数量必须大于 0，价格和费用不能为负数")
+        user_id = str(user_id)
 
         conn = self._get_conn()
         try:
             conn.execute("BEGIN")
             row = conn.execute(
-                "SELECT * FROM portfolio_positions WHERE security_code = ?",
-                (security_code,),
+                "SELECT * FROM portfolio_positions WHERE user_id = ? AND security_code = ?",
+                (user_id, security_code),
             ).fetchone()
             current_qty = float(row["quantity"]) if row else 0.0
             current_cost = float(row["avg_cost"]) if row else 0.0
@@ -836,22 +926,25 @@ class SQLiteStore:
             conn.execute(
                 """
                 INSERT INTO portfolio_transactions
-                    (trade_date, security_code, security_name, side, quantity, price, fee, note)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (user_id, trade_date, security_code, security_name, side, quantity, price, fee, note)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (trade_date, security_code, security_name, side, quantity, price, fee, note),
+                (user_id, trade_date, security_code, security_name, side, quantity, price, fee, note),
             )
 
             if new_qty <= 1e-8:
-                conn.execute("DELETE FROM portfolio_positions WHERE security_code = ?", (security_code,))
+                conn.execute(
+                    "DELETE FROM portfolio_positions WHERE user_id = ? AND security_code = ?",
+                    (user_id, security_code),
+                )
             else:
                 conn.execute(
                     """
                     INSERT INTO portfolio_positions
-                        (security_code, security_name, asset_type, sector_code, sector_name,
+                        (user_id, security_code, security_name, asset_type, sector_code, sector_name,
                          quantity, avg_cost, opened_date, target_weight, stop_loss, note, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
-                    ON CONFLICT(security_code) DO UPDATE SET
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'))
+                    ON CONFLICT(user_id, security_code) DO UPDATE SET
                         security_name = excluded.security_name,
                         asset_type = excluded.asset_type,
                         sector_code = COALESCE(excluded.sector_code, portfolio_positions.sector_code),
@@ -864,7 +957,7 @@ class SQLiteStore:
                         updated_at = datetime('now', 'localtime')
                     """,
                     (
-                        security_code, security_name, asset_type, sector_code, sector_name,
+                        user_id, security_code, security_name, asset_type, sector_code, sector_name,
                         new_qty, new_cost, trade_date, target_weight, stop_loss, note,
                     ),
                 )

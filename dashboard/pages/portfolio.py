@@ -14,9 +14,9 @@ from dashboard.components.data_source_badge import render_src_badge
 
 
 @st.cache_resource
-def get_holdings_service() -> PortfolioHoldings:
-    """复用同一账本服务；数据本身不缓存。"""
-    return PortfolioHoldings()
+def get_holdings_service(user_id: str = "") -> PortfolioHoldings:
+    """复用同一账本服务；按 user_id 隔离不同使用者的持仓。缓存以 user_id 为键。"""
+    return PortfolioHoldings(user_id=user_id)
 
 
 def _fmt_cny(value: float) -> str:
@@ -193,7 +193,13 @@ def render():
     """持仓管理主入口。"""
     st.title("💼 持仓管理")
     st.caption("管理你真实持有的标的与实际操作；通用行业信号仍以板块轮动监控中的状态机展示为准。")
-    service = get_holdings_service()
+    # 多用户：从登录会话取当前用户，确保只看自己的仓位
+    user_id = st.session_state.get("username", "")
+    if not user_id:
+        st.warning("未识别到登录用户，无法加载持仓。请重新登录后重试。")
+        return
+    service = get_holdings_service(user_id=user_id)
+    st.info(f"👤 当前账户：**{user_id}**（仅显示你自己的持仓）")
     _render_positions(service)
     _render_record_form(service)
     st.markdown("---")

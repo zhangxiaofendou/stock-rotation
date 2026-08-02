@@ -39,7 +39,7 @@ def _render_today():
         if st.button("▶ 生成今日报告", key="gen_today"):
             with st.spinner("正在生成盘后报告（重算全市场状态，请稍候）…"):
                 try:
-                    res = generate_report()
+                    res = generate_report(user_id=st.session_state.get("username", ""))
                     st.success(f"已生成 {res['as_of_date']} 的盘后报告。")
                     html = res["html"]
                 except Exception as e:  # noqa: BLE001
@@ -53,7 +53,7 @@ def _render_today():
     if st.button("🔄 重新生成", key="regen_today", help="用最新数据重算并覆盖当日报告"):
         with st.spinner("正在重新生成盘后报告…"):
             try:
-                res = generate_report()
+                res = generate_report(user_id=st.session_state.get("username", ""))
                 st.success(f"已重新生成 {res['as_of_date']} 的盘后报告。")
                 html = res["html"]
             except Exception as e:  # noqa: BLE001

@@ -484,6 +484,13 @@ def main():
         initial_sidebar_state="expanded",
     )
 
+    # 登录守卫：未登录只显示登录/注册界面，不渲染任何业务页面
+    from auth import guard, logout_control
+    current_user = guard()
+    if not current_user:
+        return
+    st.session_state["username"] = current_user
+
     # 启动时确保板块宇宙(同花顺行业)就绪，并刷新 SQLite 板块元数据
     ensure_universe()
 
@@ -500,6 +507,9 @@ def main():
             ["市场温度计", "板块轮动监控", "持仓管理", "信号绩效", "策略研究", "盘后报告"],
             label="导航菜单",
         )
+
+        # 退出登录
+        logout_control()
 
         st.markdown("---")
 
