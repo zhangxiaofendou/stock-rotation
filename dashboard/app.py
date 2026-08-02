@@ -590,6 +590,13 @@ def main():
 
         st.markdown("---")
         st.caption(f"P3看板层 v1.0 ｜ 部署版本 {deploy_tag()}")
+        # 存储后端提示：让「数据会不会丢」随时可见
+        try:
+            from data.storage import pg_store as _pg
+            st.caption("💾 云数据库持久化：已启用" if _pg.is_enabled()
+                       else "⚠️ 本地临时存储：重部署会清空数据")
+        except Exception:
+            pass
 
     # ================================================================
     # 顶部盘中实时行情条

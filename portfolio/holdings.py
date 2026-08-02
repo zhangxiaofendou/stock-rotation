@@ -9,7 +9,18 @@ from typing import Optional
 
 import pandas as pd
 
+from data.storage import pg_store
 from data.storage.sqlite_store import SQLiteStore
+
+
+def _default_store():
+    """配置了 DATABASE_URL 时用云 Postgres（重部署不丢），否则用本地 SQLite。"""
+    try:
+        if pg_store.is_enabled():
+            return pg_store.PGStore()
+    except Exception:
+        pass
+    return SQLiteStore()
 
 
 class PortfolioHoldings:
@@ -19,8 +30,8 @@ class PortfolioHoldings:
     的仓位互不串读、互不可见。
     """
 
-    def __init__(self, store: Optional[SQLiteStore] = None, user_id: str = ""):
-        self.store = store or SQLiteStore()
+    def __init__(self, store=None, user_id: str = ""):
+        self.store = store if store is not None else _default_store()
         self.user_id = str(user_id)
 
     def record_trade(

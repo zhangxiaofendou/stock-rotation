@@ -23,14 +23,31 @@ from typing import Optional, Tuple
 import streamlit as st
 
 from config.settings import CREDENTIALS_PATH, SESSION_SECRET_PATH
+from data.storage import pg_store
 
 PBKDF2_ITER = 200_000
 
 
 # ============================================================
 # 凭证存储
+# ------------------------------------------------------------
+# 配置了 DATABASE_URL（Supabase / Neon 等云 Postgres）时账号写入云数据库，
+# 重部署不丢；否则回退到本地 JSON，保持本地开发行为不变。
 # ============================================================
+def _use_pg() -> bool:
+    try:
+        return pg_store.is_enabled()
+    except Exception:
+        return False
+
+
 def _load_creds() -> dict:
+    if _use_pg():
+        try:
+            return pg_store.load_credentials()
+        except Exception:
+            # 云库暂时不可用时不静默放行，返回空集合让登录失败而非误放行
+            return {"users": {}}
     path = str(CREDENTIALS_PATH)
     if os.path.exists(path):
         try:
@@ -79,6 +96,11 @@ def verify_password(password: str, rec: dict) -> bool:
 # 会话签名
 # ============================================================
 def _get_secret() -> bytes:
+    if _use_pg():
+        try:
+            return pg_store.get_session_secret()
+        except Exception:
+            pass  # 云库不可用时退回本地文件，至少不阻断登录界面渲染
     path = str(SESSION_SECRET_PATH)
     if os.path.exists(path):
         with open(path, "rb") as f:
@@ -127,10 +149,19 @@ def register(username: str, password: str) -> Tuple[bool, str]:
         return False, "用户名不能为空"
     if not password or len(password) < 6:
         return False, "密码至少 6 位"
+    rec = hash_password(password)
+    if _use_pg():
+        try:
+            created = pg_store.add_user(username, rec)
+        except Exception as e:
+            return False, f"云数据库写入失败：{e}"
+        if not created:
+            return False, "该用户名已存在"
+        return True, "注册成功"
     creds = _load_creds()
     if username in creds["users"]:
         return False, "该用户名已存在"
-    creds["users"][username] = hash_password(password)
+    creds["users"][username] = rec
     _save_creds(creds)
     return True, "注册成功"
 
@@ -179,8 +210,26 @@ def _render_auth() -> None:
     st.caption("不同使用者使用独立账号，持仓互不干扰。密码本地哈希存储，不落明文。")
     st.caption(f"🔖 部署版本：{deploy_tag()}")
 
+    # 存储后端状态：让「数据会不会丢」一眼可见
+    if _use_pg():
+        ok, msg = pg_store.healthcheck()
+        if ok:
+            st.success("💾 账号与持仓已接入云数据库，重新部署不会丢失。", icon="✅")
+        else:
+            st.error(f"💾 云数据库连接异常，账号无法保存：{msg}")
+    else:
+        st.warning(
+            "💾 当前使用本地临时存储，Streamlit Cloud 重新部署后账号与持仓会被清空。"
+            "请在后台 Secrets 中配置 DATABASE_URL 接入云数据库。",
+            icon="⚠️",
+        )
+
     # 首次使用提示
-    if not _load_creds().get("users"):
+    try:
+        has_user = bool(_load_creds().get("users"))
+    except Exception:
+        has_user = True
+    if not has_user:
         st.info("👋 首次使用请先切换到「注册」页创建账号。", icon="ℹ️")
 
     tabs = st.tabs(["登录", "注册"])
