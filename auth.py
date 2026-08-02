@@ -17,6 +17,7 @@ import hmac
 import json
 import os
 import secrets
+import subprocess
 from typing import Optional, Tuple
 
 import streamlit as st
@@ -160,9 +161,23 @@ def clear_session() -> None:
 # ============================================================
 # 登录 / 注册界面
 # ============================================================
+def deploy_tag() -> str:
+    """返回当前部署的代码版本（git 短哈希），便于一眼确认 Cloud 是否同步到最新。"""
+    try:
+        root = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=root, capture_output=True, text=True, timeout=3,
+        )
+        return (out.stdout or "").strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 def _render_auth() -> None:
     st.title("🔐 登录 / 注册")
     st.caption("不同使用者使用独立账号，持仓互不干扰。密码本地哈希存储，不落明文。")
+    st.caption(f"🔖 部署版本：{deploy_tag()}")
     tabs = st.tabs(["登录", "注册"])
     with tabs[0]:
         with st.form("auth_login"):

@@ -485,7 +485,7 @@ def main():
     )
 
     # 登录守卫：未登录只显示登录/注册界面，不渲染任何业务页面
-    from auth import guard, logout_control
+    from auth import guard, logout_control, deploy_tag
     current_user = guard()
     if not current_user:
         return
@@ -589,7 +589,7 @@ def main():
         st.markdown("🟢 ②稳健上行 — 持有")
 
         st.markdown("---")
-        st.caption("P3看板层 v1.0")
+        st.caption(f"P3看板层 v1.0 ｜ 部署版本 {deploy_tag()}")
 
     # ================================================================
     # 顶部盘中实时行情条
