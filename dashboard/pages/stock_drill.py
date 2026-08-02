@@ -1586,22 +1586,22 @@ def render(selected_sector_code=None, sector_label="", embedded=False):
 
     merged_df = build_component_table(component_df, spot_df)
 
-    # ---- Tab 导航 ----
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "📋 成分股排名", "🏆 龙头识别", "🎯 双重漏斗选股", "📈 个股详情", "🧭 九宫格状态"
-    ])
+    # ---- Tab 导航（条件渲染，避免所有 tab 代码每次点击都执行）----
+    from dashboard.components.nav_state import persistent_tabs
+    active = persistent_tabs(
+        "stock_drill_tab",
+        ["📋 成分股排名", "🏆 龙头识别", "🎯 双重漏斗选股", "📈 个股详情", "🧭 九宫格状态"],
+    )
 
-    with tab1:
-        _render_component_list(merged_df, sector_label, has_spot_data=(spot_df is not None and not spot_df.empty))
-
-    with tab2:
+    has_spot = spot_df is not None and not spot_df.empty
+    if active == "📋 成分股排名":
+        _render_component_list(merged_df, sector_label, has_spot_data=has_spot)
+    elif active == "🏆 龙头识别":
         _render_leaders(merged_df, sector_label)
-
-    with tab3:
-        _render_stock_funnel(merged_df, sector_label, has_spot_data=(spot_df is not None and not spot_df.empty),
+    elif active == "🎯 双重漏斗选股":
+        _render_stock_funnel(merged_df, sector_label, has_spot_data=has_spot,
                              sector_code=selected_sector_code)
-
-    with tab4:
+    elif active == "📈 个股详情":
         st.subheader("📈 个股详情查询")
         render_src_badge("ths", "em")
         if not merged_df.empty and "stock_code" in merged_df.columns and "stock_name" in merged_df.columns:
@@ -1621,6 +1621,5 @@ def render(selected_sector_code=None, sector_label="", embedded=False):
                 _render_stock_detail_popup(selected_stock, stock_name)
         else:
             st.info("暂无个股数据")
-
-    with tab5:
+    elif active == "🧭 九宫格状态":
         _render_state_tab(selected_sector_code, sector_label)

@@ -12,6 +12,7 @@ import json
 import threading
 import datetime
 import logging
+import concurrent.futures
 from typing import Dict, Any
 
 # 确保项目根目录在 Python path 中
@@ -52,6 +53,19 @@ def _save_progress(state: Dict[str, Any]):
         )
     except Exception:
         logger.exception("写入管线进度文件失败")
+
+
+# 全局线程池：用于给联网调用套超时，避免云端网络慢/不通时卡死整个页面脚本
+_TIMEOUT_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+
+
+def _with_timeout(func, seconds: float = 8, default=None):
+    """在线程中执行 func，超时（seconds 秒）则返回 default，避免联网阻塞主线程。"""
+    fut = _TIMEOUT_EXECUTOR.submit(func)
+    try:
+        return fut.result(timeout=seconds)
+    except Exception:
+        return default
 
 
 class _PipelineProgressHandler(logging.Handler):
@@ -109,7 +123,7 @@ def get_latest_source_date() -> str:
 
     返回空字符串表示查询失败，避免阻塞看板渲染。
     """
-    try:
+    def _do():
         from data.sources import get_data_source
         source = get_data_source()
         df = source.get_benchmark_hist(symbol="sh000300")
@@ -118,13 +132,13 @@ def get_latest_source_date() -> str:
                 if col in df.columns:
                     latest = df[col].dropna().max()
                     return str(latest)[:10]
-    except Exception as e:
-        logger.warning(f"查询数据源最新日期失败: {e}")
-    return ""
+        return ""
+    return _with_timeout(_do, seconds=8, default="")
 
 
+@st.cache_data(ttl=60, show_spinner=False)
 def get_local_data_status():
-    """获取本地各数据类型的最新状态。
+    """获取本地各数据类型的最新状态（缓存 60s，避免每次交互重查 SQLite）。
 
     返回:
         (latest_date: str, summary_df: pd.DataFrame)
@@ -311,13 +325,26 @@ def _render_run_observability():
 @st.cache_data(ttl=180, show_spinner=False)
 def _probe_data_source() -> dict:
     """缓存 3 分钟的数据源连通性探针（解释为何行业数据滞后到 7.30）。"""
-    try:
+    def _do():
         from data.health_probe import probe_ths, verdict_ths
         p = probe_ths()
         p["_verdict"] = verdict_ths(p)
         return p
+    try:
+        return _with_timeout(_do, seconds=8, default={"_err": "数据源探针超时（>8s），已降级"})
     except Exception as e:  # noqa: BLE001
         return {"_err": str(e)}
+
+
+@st.cache_data(ttl=180, show_spinner=False)
+def _get_em_industry_count() -> int:
+    """缓存板块宇宙可用行业数（避免每次交互都调 get_data_source().get_em_industry_list()）。"""
+    try:
+        from data.sources import get_data_source
+        em_map = get_data_source().get_em_industry_list() or {}
+        return len(em_map)
+    except Exception:  # noqa: BLE001
+        return 0
 
 
 def render_data_source_health():
@@ -350,15 +377,11 @@ def render_data_source_health():
         if p.get("sample_name"):
             st.caption(f"抽样首个行业 = {p['sample_name']}")
 
-        # 补充：实际可用于更新的行业数（含兜底）
-        try:
-            from data.sources import get_data_source
-            em_map = get_data_source().get_em_industry_list() or {}
-            if em_map:
-                fallback_note = "（含静态兜底）" if not p.get("list_ok") else ""
-                st.caption(f"当前板块宇宙可用行业数：{len(em_map)}{fallback_note}")
-        except Exception:  # noqa: BLE001
-            pass
+        # 补充：实际可用于更新的行业数（含兜底，已缓存）
+        cnt = _get_em_industry_count()
+        if cnt:
+            fallback_note = "（含静态兜底）" if not p.get("list_ok") else ""
+            st.caption(f"当前板块宇宙可用行业数：{cnt}{fallback_note}")
 
 
 def is_trading_now() -> bool:

@@ -160,12 +160,13 @@ def _event_label(ev: str) -> str:
 
 def render():
     st.title("盘后报告")
-    tabs = st.tabs([TAB_TODAY, TAB_ARCHIVE, TAB_NOTIFY])
-    with tabs[0]:
+    from dashboard.components.nav_state import persistent_tabs
+    active = persistent_tabs("reports_tab", [TAB_TODAY, TAB_ARCHIVE, TAB_NOTIFY])
+    if active == TAB_TODAY:
         _render_today()
-    with tabs[1]:
+    elif active == TAB_ARCHIVE:
         _render_archive()
-    with tabs[2]:
+    elif active == TAB_NOTIFY:
         _render_notify()
 
 

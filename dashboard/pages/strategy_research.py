@@ -329,10 +329,14 @@ def _render_experiments():
 def render():
     st.title("🔬 策略研究")
     st.caption("事件驱动回测 + 信号回放 + 实验记录。与实时看板、真实持仓完全隔离，只读冻结历史行情。")
-    tabs = st.tabs(["策略回测", "历史回放", "实验记录"])
-    with tabs[0]:
+    from dashboard.components.nav_state import persistent_tabs
+    active = persistent_tabs(
+        "strategy_research_tab",
+        ["策略回测", "历史回放", "实验记录"],
+    )
+    if active == "策略回测":
         _render_backtest()
-    with tabs[1]:
+    elif active == "历史回放":
         _render_replay()
-    with tabs[2]:
+    elif active == "实验记录":
         _render_experiments()

@@ -244,12 +244,16 @@ def render():
         return
     perf["event_date"] = pd.to_datetime(perf["event_date"])
 
-    tabs = st.tabs(["绩效总览", "路径分析", "信号明细", "失效预警"])
-    with tabs[0]:
+    from dashboard.components.nav_state import persistent_tabs
+    active = persistent_tabs(
+        "signal_perf_tab",
+        ["绩效总览", "路径分析", "信号明细", "失效预警"],
+    )
+    if active == "绩效总览":
         _render_overview(perf)
-    with tabs[1]:
+    elif active == "路径分析":
         _render_paths(perf)
-    with tabs[2]:
+    elif active == "信号明细":
         _render_detail(perf)
-    with tabs[3]:
+    elif active == "失效预警":
         _render_alerts(perf)
