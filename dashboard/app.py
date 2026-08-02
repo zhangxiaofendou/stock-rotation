@@ -511,6 +511,10 @@ def main():
         # 退出登录
         logout_control()
 
+        # 一键全链路自检：出问题时点开即可拿到完整报告，无需逐项试错
+        from auth import render_diagnostics_panel
+        render_diagnostics_panel(in_sidebar=True)
+
         st.markdown("---")
 
         # 数据源诊断：为何刷新后行业数据仍滞后到 7.30（置顶 + 默认展开，确保一眼可见）

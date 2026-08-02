@@ -254,7 +254,7 @@ def main():
 
     passed = sum(1 for _, ok, _ in RESULTS if ok)
     total = len(RESULTS)
-    print(f"\n=== 自检汇总: {passed}/{total} 通过 ===")
+    print(f"\n=== 自检汇总  结果：{passed} 通过 / {total - passed} 失败 ===")
     if passed == total:
         print("✅ Postgres 持久化层逻辑全部通过。")
         return 0

@@ -259,6 +259,51 @@ def deploy_tag() -> str:
         return "unknown"
 
 
+def render_diagnostics_panel(in_sidebar: bool = False) -> None:
+    """渲染一键全链路自检面板。
+
+    线上排障不再靠「猜一个 → 让用户试一下」来回消耗：点一次按钮，
+    环境 / 依赖 / 配置 / 数据库 / 认证 / 页面全部查完，并给出可直接复制的报告。
+    """
+    container = st.sidebar if in_sidebar else st
+    label = "🩺 系统自检"
+    with container.expander(label, expanded=False):
+        st.caption("出现异常时点下面的按钮，一次性检查所有环节，把报告复制给开发者即可定位。")
+        if not st.button("开始全面检查", key=f"diag_run_{'side' if in_sidebar else 'main'}"):
+            return
+        with st.spinner("正在逐层检查…"):
+            try:
+                import diagnostics
+                report = diagnostics.run_all()
+                text = diagnostics.format_text(report)
+            except Exception as e:  # 诊断器本身异常也要能看到
+                st.error(f"诊断器执行失败：{e}")
+                st.exception(e)
+                return
+
+        counts = report.counts()
+        c1, c2, c3 = st.columns(3)
+        c1.metric("通过", counts["PASS"])
+        c2.metric("隐患", counts["WARN"])
+        c3.metric("阻断", counts["FAIL"])
+
+        if report.failures:
+            st.error(f"发现 {len(report.failures)} 个阻断性问题")
+            for chk in report.failures:
+                st.markdown(f"**{chk.category} / {chk.name}**  \n"
+                            f"现象：{chk.detail}  \n"
+                            f"处理：{chk.fix or '（见下方完整报告）'}")
+        elif report.warnings:
+            st.warning(f"可运行，但有 {len(report.warnings)} 处隐患")
+            for chk in report.warnings:
+                st.markdown(f"**{chk.category} / {chk.name}**：{chk.detail}  \n{chk.fix}")
+        else:
+            st.success("全部环节正常")
+
+        st.caption("完整报告（可全选复制）")
+        st.code(text, language="text")
+
+
 def _render_auth() -> None:
     st.title("🔐 登录 / 注册")
     st.caption("不同使用者使用独立账号，持仓互不干扰。密码本地哈希存储，不落明文。")
@@ -327,6 +372,9 @@ def _render_auth() -> None:
             except Exception as e:
                 st.error(f"注册失败：{e}")
                 st.exception(e)
+
+    st.markdown("---")
+    render_diagnostics_panel()
 
 
 def guard() -> Optional[str]:

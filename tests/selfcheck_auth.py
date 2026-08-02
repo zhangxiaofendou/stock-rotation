@@ -42,6 +42,15 @@ qp = QueryParamsMock()
 st_mock = mock.MagicMock()
 st_mock.query_params = qp
 st_mock.session_state = {}
+# 贴近真实 Streamlit 行为：按钮默认未点击、columns 返回对应个数的容器。
+# 否则 MagicMock 的真值恒为 True，会误触发按钮分支并在解包 columns 时炸掉。
+st_mock.button.return_value = False
+st_mock.form_submit_button.return_value = False
+st_mock.columns.side_effect = lambda spec, **kw: [
+    mock.MagicMock() for _ in range(spec if isinstance(spec, int) else len(spec))
+]
+st_mock.tabs.side_effect = lambda labels, **kw: [mock.MagicMock() for _ in labels]
+st_mock.sidebar.button.return_value = False
 sys.modules["streamlit"] = st_mock
 
 # 3) import 项目模块（项目根 = tests/ 的上一级）
@@ -152,7 +161,7 @@ check("密钥稳定后旧令牌仍然有效（不会被莫名踢下线）",
 
 # ---- 汇总 ----
 passed = sum(1 for _, c in results if c)
-print(f"\n=== 自检汇总: {passed}/{len(results)} 通过 ===")
+print(f"\n=== 自检汇总  结果：{passed} 通过 / {len(results) - passed} 失败 ===")
 if passed == len(results):
     print("✅ 认证逻辑全部通过，守卫不会失效、无绕过风险。")
 else:
