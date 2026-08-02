@@ -178,24 +178,36 @@ def _render_auth() -> None:
     st.title("🔐 登录 / 注册")
     st.caption("不同使用者使用独立账号，持仓互不干扰。密码本地哈希存储，不落明文。")
     st.caption(f"🔖 部署版本：{deploy_tag()}")
+
+    # 首次使用提示
+    if not _load_creds().get("users"):
+        st.info("👋 首次使用请先切换到「注册」页创建账号。", icon="ℹ️")
+
     tabs = st.tabs(["登录", "注册"])
     with tabs[0]:
         with st.form("auth_login"):
             u = st.text_input("用户名", key="login_u")
             p = st.text_input("密码", type="password", key="login_p")
-            if st.form_submit_button("登录"):
+            submitted = st.form_submit_button("登录")
+        if submitted:
+            try:
                 ok, payload = login(u, p)
                 if ok:
                     set_session(payload)
                     st.rerun()
                 else:
                     st.error(payload)
+            except Exception as e:
+                st.error(f"登录失败：{e}")
+                st.exception(e)
     with tabs[1]:
         with st.form("auth_register"):
             u = st.text_input("用户名（自定义）", key="reg_u")
             p = st.text_input("密码（至少 6 位）", type="password", key="reg_p")
             p2 = st.text_input("确认密码", type="password", key="reg_p2")
-            if st.form_submit_button("注册并登录"):
+            submitted = st.form_submit_button("注册并登录")
+        if submitted:
+            try:
                 if p != p2:
                     st.error("两次输入的密码不一致")
                 else:
@@ -209,6 +221,9 @@ def _render_auth() -> None:
                             st.error(token)
                     else:
                         st.error(msg)
+            except Exception as e:
+                st.error(f"注册失败：{e}")
+                st.exception(e)
 
 
 def guard() -> Optional[str]:
