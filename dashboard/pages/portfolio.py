@@ -302,17 +302,12 @@ def _render_positions(service: PortfolioHoldings):
             "持仓数量": st.column_config.NumberColumn(format="%.4f"),
         },
     )
-    with st.expander("✏️ 修改持仓属性（不新增交易）", expanded=False):
+    with st.expander("✏️ 修改标的元数据（不新增交易）", expanded=False):
         edit_code = st.selectbox("选择标的", positions["security_code"].astype(str).tolist(), format_func=lambda c: f"{c} ｜ {positions.loc[positions['security_code'].astype(str) == c, 'security_name'].iloc[0]}")
         current = positions[positions["security_code"].astype(str) == str(edit_code)].iloc[0]
+        st.caption("这里只能改类型、行业、板块代码、备注等元数据；持仓数量和成本由下方逐笔交易自动聚合，不在此处修改。")
         with st.form("portfolio_edit_metadata"):
-            e1, e2, e3 = st.columns(3)
-            with e1:
-                edit_qty = st.number_input("持仓数量", min_value=0.0001, value=float(current["quantity"]), step=1.0, format="%.4f")
-            with e2:
-                edit_cost = st.number_input("平均成本", min_value=0.0, value=float(current["avg_cost"]), step=0.0001, format="%.4f")
-            with e3:
-                edit_type = st.selectbox("类型", ["stock", "etf", "fund"], index=["stock", "etf", "fund"].index(str(current.get("asset_type") or "stock")))
+            edit_type = st.selectbox("类型", ["stock", "etf", "fund"], index=["stock", "etf", "fund"].index(str(current.get("asset_type") or "stock")))
             e4, e5 = st.columns(2)
             with e4:
                 edit_sector = st.text_input("所属行业/板块", value=str(current.get("sector_name") or ""))
@@ -323,11 +318,10 @@ def _render_positions(service: PortfolioHoldings):
         if edit_submitted:
             try:
                 service.update_metadata(
-                    str(edit_code), quantity=edit_qty, avg_cost=edit_cost,
-                    asset_type=edit_type, sector_name=edit_sector.strip() or None,
+                    str(edit_code), asset_type=edit_type, sector_name=edit_sector.strip() or None,
                     sector_code=edit_sector_code.strip() or None, note=edit_note.strip() or None,
                 )
-                st.success(f"已修改 {edit_code}，不会新增交易记录。")
+                st.success(f"已修改 {edit_code} 的元数据，不会新增交易记录。")
                 st.rerun()
             except Exception as exc:
                 st.error(f"修改失败：{exc}")

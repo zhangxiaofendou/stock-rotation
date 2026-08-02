@@ -79,7 +79,7 @@ class PortfolioHoldings:
         """只修改持仓属性，不新增交易、不改变数量和平均成本。"""
         if not self.user_id:
             raise ValueError("持仓操作必须指定 user_id（当前用户未登录？）")
-        allowed = {"security_name", "asset_type", "sector_code", "sector_name", "quantity", "avg_cost", "target_weight", "stop_loss", "note"}
+        allowed = {"security_name", "asset_type", "sector_code", "sector_name", "target_weight", "stop_loss", "note"}
         changes = {k: v for k, v in fields.items() if k in allowed}
         if not changes:
             raise ValueError("没有可修改的持仓属性")
