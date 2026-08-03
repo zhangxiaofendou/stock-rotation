@@ -64,6 +64,11 @@ class FakeCursor:
         elif low.startswith("select * from portfolio_transactions"):
             self.description = [("id",), ("user_id",), ("security_code",)]
             self._rows = list(self.conn.state.get("tx", []))
+        elif low.startswith("select trade_date, security_name, side, quantity, price, fee from portfolio_transactions"):
+            # _rebuild_portfolio_position 列名访问，模拟 PG 按列顺序返回
+            self._rows = list(self.conn.state.get("rebuild_tx", []))
+        elif low.startswith("select security_name, asset_type, sector_code, sector_name, opened_date, target_weight, stop_loss, note from portfolio_positions"):
+            self._rows = list(self.conn.state.get("rebuild_old", []))
 
     def fetchone(self):
         return self._rows[0] if self._rows else None
@@ -234,6 +239,37 @@ def main():
     # ---- 12. 会话密钥持久化 ----
     secret = pg.get_session_secret()
     check("会话密钥为 32 字节", isinstance(secret, bytes) and len(secret) == 32, str(len(secret)))
+
+    # ---- 12.5 流水重建（修复 PG 列索引错位导致 float('BUY') 的 bug） ----
+    # 模拟 PG 按列顺序返回，列序：trade_date, security_name, side, quantity, price, fee
+    state["rebuild_tx"] = [
+        ("2026-06-16", "旅游ETF富国", "BUY", 6200.0, 0.597, 5.0),
+        ("2026-07-30", "旅游ETF富国", "BUY", 18400.0, 1.012, 9.0),
+    ]
+    state["rebuild_old"] = []  # 之前没有持仓聚合行
+    # 用一个新 conn，避免上一次 INSERT 影响
+    state2 = {"rebuild_tx": state["rebuild_tx"], "rebuild_old": state["rebuild_old"]}
+    conn2 = FakeConn(state2)
+    conns.append(conn2)
+    raised = None
+    try:
+        store._rebuild_portfolio_position(conn2, "alice", "159766")
+    except Exception as e:
+        raised = repr(e)
+    check("_rebuild_portfolio_position 不再触发 float('BUY')", raised is None, raised)
+    # 重建后应发出聚合 INSERT，参数里 quantity 和 avg_cost 应等于两笔合计
+    ins = [(s, p) for s, p in conn2.log if "insert into portfolio_positions" in s.lower()]
+    check("重建后写入持仓行", len(ins) == 1)
+    if ins:
+        params = ins[0][1]
+        # 列序：user_id, code, name, asset_type, sector_code, sector_name, qty, avg_cost, ...
+        qty, cost = params[6], params[7]
+        check("重建后持仓数量 = 6200+18400 = 24600",
+              abs(qty - 24600.0) < 1e-6, str(qty))
+        # avg_cost = (6200*0.597 + 5 + 18400*1.012 + 9) / 24600
+        expected = (6200 * 0.597 + 5.0 + 18400 * 1.012 + 9.0) / 24600.0
+        check("重建后均价按加权金额计算", abs(cost - expected) < 1e-6,
+              f"got {cost} vs expected {expected}")
 
     # ---- 13. 云库不可用时不误放行 ----
     def boom(url):

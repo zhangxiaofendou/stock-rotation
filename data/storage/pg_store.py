@@ -393,24 +393,87 @@ class PGStore:
             conn.close()
 
     def _rebuild_portfolio_position(self, conn, user_id: str, security_code: str) -> None:
+        """按当前流水重新聚合某标的的持仓。
+
+        历史实现用 ``row[4..7]`` 这种位置索引取 PG ``SELECT *`` 的列，
+        实际上 PG 的列顺序是 id, user_id, trade_date, security_code,
+        security_name, side, quantity, price, fee, note, created_at，
+        索引与代码不一致会触发 ``could not convert string to float: 'BUY'``
+        这类典型错误。这里改成显式列出列名并按列名解包，schema 变更也不会错位。
+        """
         with conn.cursor() as cur:
-            cur.execute("SELECT * FROM portfolio_transactions WHERE user_id = %s AND security_code = %s ORDER BY id", (str(user_id), str(security_code)))
-            rows = cur.fetchall(); cur.execute("SELECT * FROM portfolio_positions WHERE user_id = %s AND security_code = %s", (str(user_id), str(security_code)))
-            old = cur.fetchone(); qty, cost_amount, opened_date, last_name = 0.0, 0.0, None, None
+            cur.execute(
+                "SELECT trade_date, security_name, side, quantity, price, fee "
+                "FROM portfolio_transactions WHERE user_id = %s AND security_code = %s ORDER BY id",
+                (str(user_id), str(security_code)),
+            )
+            rows = cur.fetchall()
+            cur.execute(
+                "SELECT security_name, asset_type, sector_code, sector_name, opened_date, "
+                "target_weight, stop_loss, note "
+                "FROM portfolio_positions WHERE user_id = %s AND security_code = %s",
+                (str(user_id), str(security_code)),
+            )
+            old = cur.fetchone()
+            qty, cost_amount, opened_date, last_name = 0.0, 0.0, None, None
             for row in rows:
-                side, q, price, fee = str(row[4]).upper(), float(row[5]), float(row[6]), float(row[7])
-                if side == "BUY": qty += q; cost_amount += q * price + fee; opened_date = opened_date or row[1]
+                # 列顺序：trade_date, security_name, side, quantity, price, fee
+                trade_date, sec_name, side_raw, q, price, fee = row
+                side = str(side_raw).upper()
+                q, price, fee = float(q), float(price), float(fee)
+                if side == "BUY":
+                    qty += q
+                    cost_amount += q * price + fee
+                    opened_date = opened_date or trade_date
                 elif side == "SELL":
-                    if q > qty + 1e-8: raise ValueError(f"流水重算失败：{security_code} 卖出数量超过累计买入")
-                    avg = cost_amount / qty if qty > 1e-8 else 0.0; qty -= q; cost_amount = qty * avg
-                elif side == "ADJUST": qty = q
-                last_name = row[3] or last_name
-            cur.execute("DELETE FROM portfolio_positions WHERE user_id = %s AND security_code = %s", (str(user_id), str(security_code)))
-            if qty <= 1e-8: return
-            cur.execute("""INSERT INTO portfolio_positions
-                (user_id, security_code, security_name, asset_type, sector_code, sector_name, quantity, avg_cost, opened_date, target_weight, stop_loss, note, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))""",
-                (str(user_id), str(security_code), last_name or (old[2] if old else security_code), old[3] if old else "stock", old[4] if old else None, old[5] if old else None, qty, cost_amount / qty if qty else 0.0, opened_date or (old[8] if old else None), old[9] if old else None, old[10] if old else None, old[11] if old else None))
+                    if q > qty + 1e-8:
+                        raise ValueError(f"流水重算失败：{security_code} 卖出数量超过累计买入")
+                    avg = cost_amount / qty if qty > 1e-8 else 0.0
+                    qty -= q
+                    cost_amount = qty * avg
+                elif side == "ADJUST":
+                    qty = q
+                last_name = sec_name or last_name
+
+            cur.execute(
+                "DELETE FROM portfolio_positions WHERE user_id = %s AND security_code = %s",
+                (str(user_id), str(security_code)),
+            )
+            if qty <= 1e-8:
+                return
+
+            # old 列顺序：security_name, asset_type, sector_code, sector_name,
+            # opened_date, target_weight, stop_loss, note
+            old_name = old[0] if old else security_code
+            old_type = old[1] if old else "stock"
+            old_sector_code = old[2] if old else None
+            old_sector_name = old[3] if old else None
+            old_opened = old[4] if old else None
+            old_target = old[5] if old else None
+            old_stop = old[6] if old else None
+            old_note = old[7] if old else None
+
+            cur.execute(
+                """INSERT INTO portfolio_positions
+                    (user_id, security_code, security_name, asset_type, sector_code, sector_name,
+                     quantity, avg_cost, opened_date, target_weight, stop_loss, note, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                        to_char(now(), 'YYYY-MM-DD HH24:MI:SS'))""",
+                (
+                    str(user_id),
+                    str(security_code),
+                    last_name or old_name,
+                    old_type,
+                    old_sector_code,
+                    old_sector_name,
+                    qty,
+                    cost_amount / qty if qty else 0.0,
+                    opened_date or old_opened,
+                    old_target,
+                    old_stop,
+                    old_note,
+                ),
+            )
 
     def update_portfolio_transaction(self, transaction_id: int, user_id: str = "", **fields) -> None:
         allowed = {"trade_date", "security_code", "security_name", "side", "quantity", "price", "fee", "note"}; updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
