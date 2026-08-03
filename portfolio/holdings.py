@@ -17,12 +17,19 @@ _UNSET = object()
 
 
 def _default_store():
-    """配置了 DATABASE_URL 时用云 Postgres（重部署不丢），否则用本地 SQLite。"""
-    try:
-        if pg_store.is_enabled():
+    """配置了 DATABASE_URL 时用云 Postgres（重部署不丢），否则用本地 SQLite。
+
+    安全约束：若配置了 DATABASE_URL 但云库实际连不上，绝不「假装云库可用」——
+    会记录危险回退原因并暴露给诊断器/侧边栏，避免「以为用云库、实则本地、
+    Reboot 后数据全丢」的隐蔽事故。仍回退 SQLite 以保持页面可用。
+    """
+    if pg_store.is_enabled():
+        try:
             return pg_store.PGStore()
-    except Exception:
-        pass
+        except Exception as e:
+            pg_store.record_pg_fallback(str(e))
+            import logging
+            logging.getLogger(__name__).error("云库不可用，回退本地 SQLite：%s", e)
     return SQLiteStore()
 
 

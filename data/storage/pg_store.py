@@ -46,6 +46,47 @@ except Exception:
 
 
 # ------------------------------------------------------------
+# 后端真实状态（避免「假云库」误导）
+# ------------------------------------------------------------
+# 当配置了 DATABASE_URL 但云库实际连不上时，代码会回退本地 SQLite。
+# 这种「配了 URL 却用本地」的状态极其危险（Reboot 后数据丢失），必须暴露。
+_pg_fallback_reason: Optional[str] = None
+
+
+def record_pg_fallback(reason: str) -> None:
+    """记录「配了 DATABASE_URL 但云库不可用、已回退本地」的危险状态。"""
+    global _pg_fallback_reason
+    _pg_fallback_reason = str(reason)
+
+
+def storage_status() -> dict:
+    """返回当前存储后端真实状态，让界面暴露「数据是否会丢」。
+
+    返回字段：
+      backend: "postgres" | "sqlite" | "sqlite-fallback"
+      safe:    数据是否安全（重部署不丢）
+      detail:  人类可读说明
+    """
+    if not is_enabled():
+        return {
+            "backend": "sqlite",
+            "safe": False,
+            "detail": "未配置 DATABASE_URL，使用本地临时存储，重部署/Reboot 会清空数据。",
+        }
+    ok, msg = healthcheck()
+    if ok:
+        return {"backend": "postgres", "safe": True, "detail": msg}
+    return {
+        "backend": "sqlite-fallback",
+        "safe": False,
+        "detail": (
+            f"已配置 DATABASE_URL 但云库不可用：{msg}。"
+            "已回退本地临时存储，重部署/Reboot 会清空数据，请尽快修复连接。"
+        ),
+    }
+
+
+# ------------------------------------------------------------
 # 连接串获取
 # ------------------------------------------------------------
 def get_database_url() -> Optional[str]:
