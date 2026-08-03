@@ -27,6 +27,7 @@ COMPILE_TARGETS = [
     "data/storage/sqlite_store.py",
     "dashboard/pages/portfolio.py",
     "dashboard/pages/reports.py",
+    "data/daily_pipeline.py",
 ]
 
 SUITES = [
@@ -38,7 +39,9 @@ SUITES = [
     ("持仓分析逻辑", "tests/selfcheck_portfolio_analysis.py"),
     ("费用自动估算", "tests/selfcheck_fees.py"),
     ("ETF板块关联", "tests/selfcheck_etf_sector.py"),
+    ("ETF行情链路", "tests/selfcheck_etf_quote.py"),
     ("持仓属性修改", "tests/selfcheck_metadata_edit.py"),
+    ("管线目标交易日", "tests/selfcheck_pipeline_target.py"),
 ]
 
 

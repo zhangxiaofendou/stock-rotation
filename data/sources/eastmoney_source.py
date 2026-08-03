@@ -101,11 +101,22 @@ def _secid_of_index(code: str) -> Optional[str]:
 
 
 def _secid_of_stock(code: str) -> Optional[str]:
-    """把个股代码（600519）转为东财 secid（1.600519）。"""
+    """把个股/ETF 代码转为东财 secid（1.600519 / 0.159766）。
+
+    覆盖：
+      - 沪市股票：6/9 开头 -> 1.{code}
+      - 深市股票：0/3 开头 -> 0.{code}
+      - 沪市 ETF：5 开头  -> 1.{code}（如 510300）
+      - 深市 ETF：1 开头  -> 0.{code}（如 159766）
+      - 北交所股票：4/8 开头 -> 0.{code}
+    """
     code = str(code).strip()
-    if code[0] in ("6", "9"):
+    if not code or len(code) != 6 or not code.isdigit():
+        return None
+    head = code[0]
+    if head in ("6", "9", "5"):
         return f"1.{code}"
-    if code[0] in ("0", "3"):
+    if head in ("0", "3", "1", "4", "8"):
         return f"0.{code}"
     return None
 
@@ -282,19 +293,28 @@ class EastMoneyLiveSource(BaseDataSource):
             return None
 
     def _quote(self, secids, fields="f43,f57,f58,f169,f170,f86"):
-        """东方财富 push2 实时快照。返回 list[dict]，失败返回 []。"""
+        """东方财富 push2 实时快照。返回 list[dict]，失败返回 []。
+
+        含重试：东财实时接口对基金/ETF 偶尔会"Remote end closed"或限流，
+        1-2 次重试通常可恢复；重试用尽才返回 []。
+        """
         if isinstance(secids, str):
             secids = [secids]
-        secids = ",".join(secids)
-        url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secids}&fields={fields}"
-        try:
-            req = urllib.request.Request(url, headers=_HEADERS)
-            raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
-            d = json.loads(raw)
-            if d.get("data"):
-                return [d["data"]]
-        except Exception as e:
-            logger.warning("东财实时快照失败: %s", e)
+        secids_str = ",".join(secids)
+        url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secids_str}&fields={fields}"
+        last_err = None
+        for attempt in range(1, max(2, self._retries) + 1):
+            try:
+                req = urllib.request.Request(url, headers=_HEADERS)
+                raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+                d = json.loads(raw)
+                if d.get("data"):
+                    return [d["data"]]
+            except Exception as e:
+                last_err = e
+                logger.debug("东财实时快照失败(第 %d 次): %s", attempt, e)
+                time.sleep(0.4 * attempt)
+        logger.warning("东财实时快照失败(secids=%s): %s", secids_str, last_err)
         return []
 
     def get_realtime_sector_quotes(self, secids: Optional[list] = None) -> list:

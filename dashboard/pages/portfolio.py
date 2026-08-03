@@ -34,33 +34,76 @@ def load_sector_states_for_portfolio() -> pd.DataFrame:
 
 @st.cache_data(ttl=300, show_spinner=False)
 def load_live_quotes_for_portfolio(codes: tuple[str, ...]) -> pd.DataFrame:
-    """读取当前持仓实时行情；失败返回空表，不把行情写入持仓账本。"""
-    from data.sources.eastmoney_source import EastMoneyLiveSource, _secid_of_stock
+    """读取当前持仓实时行情；失败返回空表，不把行情写入持仓账本。
 
-    rows = []
-    source = EastMoneyLiveSource()
-    secids = [_secid_of_stock(code) for code in codes]
-    secids = [x for x in secids if x]
-    if not secids:
-        return pd.DataFrame(columns=["security_code", "market_price", "quote_source"])
-    for item in source.get_live_quote(secids, fields="f43,f57,f58,f127,f169,f170"):
-        code = str(item.get("f57") or "")
-        if not code:
-            continue
+    主源：东方财富 push2（股票）。
+    兜底：腾讯 qt.gtimg.cn（东财限流或对 ETF 拒绝时自动回退，对 ETF 稳定）。
+    仍然拿不到价的代码会被自然丢弃，由页面渲染层显示「暂无行情」。
+    """
+    from data.sources.eastmoney_source import EastMoneyLiveSource, _secid_of_stock
+    from portfolio.stock_lookup import _fetch_tencent  # 复用腾讯解析逻辑
+
+    rows: list[dict] = []
+    code_to_secid: dict[str, str] = {}
+    for code in codes:
+        sid = _secid_of_stock(code)
+        if sid:
+            code_to_secid[code] = sid
+
+    if code_to_secid:
         try:
-            raw = item.get("f43")
-            price = float(raw) / 100.0 if isinstance(raw, int) else float(raw)
-            rows.append({
-                "security_code": code,
-                "market_price": price,
-                "quote_name": str(item.get("f58") or ""),
-                "quote_sector_name": str(item.get("f127") or "") or None,
-                "quote_pct": (float(item.get("f170")) / 100.0 if item.get("f170") is not None else np.nan),
-                "quote_source": "eastmoney_realtime",
-            })
-        except (TypeError, ValueError):
+            source = EastMoneyLiveSource()
+            for secid, item in zip(
+                code_to_secid.values(),
+                source.get_live_quote(
+                    list(code_to_secid.values()),
+                    fields="f43,f57,f58,f127,f169,f170",
+                ),
+            ):
+                code = str(item.get("f57") or "")
+                if not code:
+                    continue
+                try:
+                    raw = item.get("f43")
+                    price = float(raw) / 100.0 if isinstance(raw, int) else float(raw)
+                except (TypeError, ValueError):
+                    continue
+                if price <= 0 or not np.isfinite(price):
+                    continue
+                rows.append({
+                    "security_code": code,
+                    "market_price": round(price, 4),
+                    "quote_name": str(item.get("f58") or ""),
+                    "quote_sector_name": str(item.get("f127") or "") or None,
+                    "quote_pct": (float(item.get("f170")) / 100.0 if item.get("f170") is not None else np.nan),
+                    "quote_source": "eastmoney_realtime",
+                })
+        except Exception as e:  # noqa: BLE001
+            # 整批主源失败时不影响后续腾讯兜底
+            import logging
+            logging.getLogger(__name__).warning("东财实时快照整体失败: %s", e)
+
+    # 已拿到价的代码集合
+    priced = {r["security_code"] for r in rows}
+    # 没拿到价的代码用腾讯实时兜底
+    for code in codes:
+        if code in priced:
             continue
-    return pd.DataFrame(rows)
+        info = _fetch_tencent(code)
+        if not info or not info.get("price"):
+            continue
+        rows.append({
+            "security_code": code,
+            "market_price": round(float(info["price"]), 4),
+            "quote_name": info.get("name") or "",
+            "quote_sector_name": info.get("sector_name") or None,
+            "quote_pct": np.nan,
+            "quote_source": "tencent_realtime",
+        })
+    return pd.DataFrame(rows, columns=[
+        "security_code", "market_price", "quote_name",
+        "quote_sector_name", "quote_pct", "quote_source",
+    ])
 
 
 def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, states: pd.DataFrame) -> pd.DataFrame:
