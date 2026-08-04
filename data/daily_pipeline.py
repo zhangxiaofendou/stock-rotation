@@ -77,13 +77,50 @@ def is_trading_day(today: str) -> bool:
     return datetime.strptime(today, "%Y-%m-%d").weekday() < 5
 
 
-def latest_trading_day(today: str) -> str:
+def close_data_available(today: str, now: datetime) -> bool:
+    """判断 `today` 这天的收盘行情在 `now` 时刻是否已经可拉到。
+
+    历史日期的收盘数据恒可得（A 股收盘即落库）；未来日期永远不可能有；只有
+    「同一天」才需要看时刻：必须 ≥ 15:30（沪深收盘集合竞价结束，THS/东财
+    接口此时开始提供当日 K 线 / 板块收盘）。
+
+    之所以非要 15:30 这一刀：早盘 07:30 这种兜底自动化如果把目标日定为当天
+    （因为当天是 weekday），下游就拉到空数据、产物的「最新日期」被刷新为空，
+    看板因此一直停留在上一个真正成功的真实交易日（看板上看到「板块涨幅统计
+    2026-07-31」就是这条 bug 的表现）。正确做法是把任何尚未收盘的候选日都
+    当作「不可得」，继续向历史回溯。
     """
-    返回 ≤ today 的最近交易日。
+    try:
+        target = datetime.strptime(today, "%Y-%m-%d").date()
+    except Exception:
+        return False
+    if target < now.date():
+        return True   # 历史日 → 永可得
+    if target > now.date():
+        return False  # 未来日 → 永不可得
+    # 同日：必须是交易日，且当前时刻已过 15:30
+    if not is_trading_day(today):
+        return False
+    cutoff = datetime.strptime("15:30", "%H:%M").time()
+    return now.time() >= cutoff
+
+
+def latest_trading_day(today: str, now: datetime = None) -> str:
+    """
+    返回 ≤ today 的、且收盘数据在 `now` 时刻已可得的最近交易日。
 
     优先用真实交易日历（含节假日）；日历为空或最近 30 天无任何交易日
     （日历过旧）时回退 weekday 法。
+
+    与原版的差异：原版只看「今天是不是 weekday」就直接返回，导致周一 07:30
+    这种「今天是交易日但当天收盘数据根本还没出」的场景把目标错误地定为当天，
+    然后下游拉到空数据、产物的最新日期被刷新为空——最终板块页面停留在上一次
+    真正成功跑出来的日期（实测就是 2026-07-31）。本版本在候选日就是 `today`
+    时再叠一层 close_data_available 过滤，确保目标一定是「跑就一定能拉到数据」
+    的那一个交易日。历史日直接采纳（历史数据恒可得）。
     """
+    if now is None:
+        now = datetime.now()
     try:
         from data.calendar import TradeCalendar
         from data.storage.sqlite_store import SQLiteStore
@@ -91,15 +128,21 @@ def latest_trading_day(today: str) -> str:
             cal = TradeCalendar()
             d = datetime.strptime(today, "%Y-%m-%d")
             for _ in range(30):
-                if cal.is_trading_day(d.strftime("%Y-%m-%d")):
-                    return d.strftime("%Y-%m-%d")
+                ds = d.strftime("%Y-%m-%d")
+                if cal.is_trading_day(ds):
+                    if d.date() < now.date() or close_data_available(ds, now):
+                        return ds
                 d -= timedelta(days=1)
             logger.debug("真实日历最近 30 天无交易日（可能过旧），回退 weekday")
     except Exception as e:
         logger.debug(f"真实交易日历查询失败，回退 weekday：{e}")
+    # weekday 回退：同样按 close_data_available 过滤
     d = datetime.strptime(today, "%Y-%m-%d")
     for _ in range(10):
-        if d.weekday() < 5:
+        if d.weekday() < 5 and (
+            d.date() < now.date()
+            or close_data_available(d.strftime("%Y-%m-%d"), now)
+        ):
             return d.strftime("%Y-%m-%d")
         d -= timedelta(days=1)
     return today
@@ -532,7 +575,9 @@ def main():
         steps.append(f"交易日历: 跳过({e})")
 
     # 目标：补到最新交易日收盘。任意时点运行都以此为目标，天然支持"失败后续补"。
-    target = latest_trading_day(today)
+    # 必须把当前时刻一并传入，否则早盘 07:30 兜底自动化会把目标错误地定在
+    # 当天（当天虽是 weekday 但尚未收盘），下游拉到空数据、产物最新日期被刷新为空。
+    target = latest_trading_day(today, datetime.now())
 
     # 幂等守卫（优先级最高）：趋势与 RS 产物均已覆盖目标交易日，说明整条管线已完成，
     # 直接跳过。这能正确覆盖「周末/节假日的正常无更新」场景（数据已是最近交易日收盘）。

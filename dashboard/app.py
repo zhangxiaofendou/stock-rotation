@@ -200,6 +200,32 @@ def run_manual_data_update() -> tuple:
     return True, "已启动完整数据管线（后台运行，约 5–10 分钟）。完成后页面会自动刷新；也可随时手动刷新查看进度。"
 
 
+def _maybe_auto_refresh_on_stale():
+    """Reboot/重部署后 Git 旧 seed 会覆盖本地最新 parquet，导致 K线/板块数据退回旧日期。
+
+    本函数在 App 启动后检测：若本地数据最新日期落后于数据源最新交易日，
+    则后台自动跑一次完整管线（非阻塞），把数据恢复到最新。无需用户手动点击，
+    也无需改动 Streamlit Cloud 配置。侧栏会显示「⏳ 管线运行中」实时进度。
+    """
+    try:
+        progress = _load_progress()
+        if progress.get("status") == "running":
+            return  # 已在后台运行，避免重复触发
+        src = get_latest_source_date()            # 数据源最新交易日
+        local, _ = get_local_data_status()        # 本地各数据最新日期
+        needs = bool(src) and (not local or src > local)
+        if not needs:
+            # 已是最新：重置会话标记，便于下次真正落后时再次触发
+            st.session_state.pop("_auto_refresh_done", None)
+            return
+        if st.session_state.get("_auto_refresh_done"):
+            return  # 本次会话已尝试过（失败则不无限重试，用户可手动点按钮）
+        st.session_state["_auto_refresh_done"] = True
+        threading.Thread(target=_background_pipeline_run, daemon=True).start()
+    except Exception:
+        logger.warning("启动自动刷新判断失败", exc_info=True)
+
+
 @st.cache_resource
 def ensure_universe():
     """看板启动时确保板块宇宙(同花顺行业)就绪，并刷新 SQLite 板块元数据。"""
@@ -490,6 +516,9 @@ def main():
     if not current_user:
         return
     st.session_state["username"] = current_user
+
+    # Reboot/重部署后 Git seed 会覆盖本地最新 parquet，自动恢复到最新数据
+    _maybe_auto_refresh_on_stale()
 
     # 启动时确保板块宇宙(同花顺行业)就绪，并刷新 SQLite 板块元数据
     ensure_universe()
