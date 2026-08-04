@@ -371,6 +371,7 @@ def check_database(report: Report) -> None:
         report.add(cat, "云库连通性", SKIP, "未启用 Postgres（无驱动或未配置 DATABASE_URL）")
         return
 
+    n_user = n_pos = n_tx = n_owner = 0
     ok = False
     with _guard(report, cat, "云库连通性"):
         ok, msg = pg_store.healthcheck()
@@ -418,6 +419,29 @@ def check_database(report: Report) -> None:
             conn.close()
         report.add(cat, "数据量", PASS,
                    f"账号 {n_user} 个｜持仓 {n_pos} 条（分属 {n_owner} 个用户）｜流水 {n_tx} 条")
+
+    with _guard(report, cat, "数据恢复结论"):
+        # 上面已把 n_user / n_pos / n_tx 算好，直接用，避免二次连库。
+        if n_tx > 0 or n_pos > 0:
+            report.add(
+                cat, "数据恢复结论", PASS,
+                f"✅ 数据在云端，重连后自动恢复：持仓 {n_pos} 条、流水 {n_tx} 笔"
+                f"（分属 {n_owner} 个用户）。Reboot 后直接登录即可看到，无需重新录入。",
+                "若登录后持仓仍为空，请用同一账号登录（数据按账号隔离）。",
+            )
+        elif n_user > 0:
+            report.add(
+                cat, "数据恢复结论", WARN,
+                "⚠️ 云库里只有账号、没有任何持仓或交易流水——历史持仓从未成功写入云库，"
+                "已随上次 Reboot 永久丢失，只能重新录入。",
+                "根因：之前 DATABASE_URL 连不上，代码回退到容器本地文件（已修复为明确告警）。",
+            )
+        else:
+            report.add(
+                cat, "数据恢复结论", WARN,
+                "⚠️ 云库完全为空，从未写入过任何账号或持仓——数据从未进入云库，已丢失。",
+                "如需持久化，确认 Secrets 的 DATABASE_URL 使用 Session pooler 地址后 Reboot。",
+            )
 
     with _guard(report, cat, "会话密钥持久化"):
         sec = pg_store.get_session_secret()

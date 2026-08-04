@@ -256,6 +256,31 @@ def healthcheck() -> Tuple[bool, str]:
         return False, f"连接失败：{msg}{hint}"
 
 
+def count_cloud_rows() -> dict:
+    """返回云端各表行数，供登录页/诊断器直观判断「数据是否还在」。
+
+    连不上或表不存在时返回全 0（不抛异常），由调用方决定如何提示。
+    """
+    out = {"users": 0, "positions": 0, "transactions": 0}
+    if not is_enabled():
+        return out
+    try:
+        conn = connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT count(*) FROM app_users")
+                out["users"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM portfolio_positions")
+                out["positions"] = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM portfolio_transactions")
+                out["transactions"] = cur.fetchone()[0]
+        finally:
+            conn.close()
+    except Exception:
+        pass
+    return out
+
+
 # ============================================================
 # 账号凭证
 # ============================================================

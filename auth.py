@@ -313,7 +313,27 @@ def _render_auth() -> None:
     if _use_pg():
         ok, msg = pg_store.healthcheck()
         if ok:
-            st.success("💾 账号与持仓已接入云数据库，重新部署不会丢失。", icon="✅")
+            try:
+                c = pg_store.count_cloud_rows()
+                st.success(
+                    "💾 账号与持仓已接入云数据库，重新部署不会丢失。\n"
+                    f"云端现有：账号 {c['users']} 个｜持仓 {c['positions']} 条｜流水 {c['transactions']} 笔",
+                    icon="✅",
+                )
+                if c["transactions"] == 0 and c["users"] > 0:
+                    st.warning(
+                        "⚠️ 云库只有账号、没有持仓/流水——历史持仓从未写入云库，"
+                        "已随上次 Reboot 永久丢失，需要重新录入。",
+                        icon="⚠️",
+                    )
+                elif c["users"] == 0:
+                    st.warning(
+                        "⚠️ 云库完全为空，从未写入过任何账号或持仓——数据从未进入云库，已丢失。",
+                        icon="⚠️",
+                    )
+            except Exception as e:
+                st.success("💾 账号与持仓已接入云数据库，重新部署不会丢失。", icon="✅")
+                st.caption(f"（读取云库数据量失败：{e}）")
         else:
             st.error(f"💾 云数据库连接异常，账号无法保存：{msg}")
     else:

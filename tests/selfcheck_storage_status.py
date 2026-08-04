@@ -70,6 +70,48 @@ importlib.reload(holdings)
 store2 = holdings._default_store()
 check("未配置 → _default_store 用 SQLite", isinstance(store2, SQLiteStore))
 
+# 6. count_cloud_rows：未配置/连不上返回全 0（不抛异常），连通返回真实行数
+class _FakeCur:
+    def __init__(self, vals):
+        self._vals = list(vals)
+    def execute(self, sql, *a):
+        pass
+    def fetchone(self):
+        return (self._vals.pop(0),)
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+class _FakeConn:
+    def __init__(self, vals):
+        self._vals = vals
+    def cursor(self):
+        return _FakeCur(self._vals)
+    def close(self):
+        pass
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+
+os.environ.pop("DATABASE_URL", None)
+importlib.reload(pg_store)
+c0 = pg_store.count_cloud_rows()
+check("未配置 → count_cloud_rows 全 0", c0 == {"users": 0, "positions": 0, "transactions": 0}, c0)
+
+os.environ["DATABASE_URL"] = "postgresql://u:p@localhost:5432/db"
+importlib.reload(pg_store)
+with mock.patch.object(pg_store, "_DRIVER", "psycopg3"), \
+     mock.patch.object(pg_store, "connect", return_value=_FakeConn([3, 2, 5])):
+    c1 = pg_store.count_cloud_rows()
+    check("连通 → count_cloud_rows 返回真实行数", c1 == {"users": 3, "positions": 2, "transactions": 5}, c1)
+
+with mock.patch.object(pg_store, "_DRIVER", "psycopg3"), \
+     mock.patch.object(pg_store, "connect", side_effect=RuntimeError("连不上")):
+    c2 = pg_store.count_cloud_rows()
+    check("连不上 → count_cloud_rows 返回全 0 且不抛异常", c2 == {"users": 0, "positions": 0, "transactions": 0}, c2)
+
 passed = sum(1 for _, c in results if c)
 total = len(results)
 print(f"\n=== 自检汇总  结果：{passed} 通过 / {total - passed} 失败 ===")
