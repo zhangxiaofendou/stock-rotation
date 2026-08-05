@@ -164,6 +164,27 @@ _STATE_FLOW_WEIGHT = {
     "⑨底背离":   +0.7,
 }
 
+# 板块组着色：每个板块组固定一种独立色，避免中间层节点共用红/绿看不出组别。
+# 颜色按色相分散（蓝/绿/橙/棕/紫/粉/灰），符合 A 股行业惯例。
+# 流入/流出的方向语义改由「节点后缀（净流入/净流出）+ 连线色 + 外层行业节点深浅」表达。
+GROUP_COLOR = {
+    "大金融": "#1E88E5",  # 蓝 — 金融稳重
+    "新能源": "#43A047",  # 绿 — 能源活力
+    "消费":   "#FB8C00",  # 橙 — 温暖消费
+    "周期":   "#6D4C41",  # 棕 — 钢铁重工业
+    "科技":   "#8E24AA",  # 紫 — 科技神秘
+    "医药":   "#E91E63",  # 粉 — 医药关怀
+    "其他":   "#757575",  # 灰 — 兜底
+}
+
+
+def _hex_to_rgba(hex_color: str, alpha: float) -> str:
+    """把 #RRGGBB 颜色转为带 alpha 的 rgba 字符串（用于连线/弱化节点）。"""
+    h = hex_color.lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return f"rgba({int(h[0:2], 16)},{int(h[2:4], 16)},{int(h[4:6], 16)},{alpha})"
+
 
 @st.cache_data(ttl=3600)
 def _build_group_capital_path_figure(state_df: pd.DataFrame):
@@ -228,9 +249,9 @@ def _build_group_capital_path_figure(state_df: pd.DataFrame):
         if len(inds) > TOP_N:
             add_node(f"{g}·其他{len(inds) - TOP_N}行业\n（净流出）", "#F8BBD0")
     for g in out_groups:
-        add_node(f"{g}\n（净流出）", "#F44336")
+        add_node(f"{g}\n（净流出）", GROUP_COLOR.get(g, "#F44336"))
     for g in in_groups:
-        add_node(f"{g}\n（净流入）", "#4CAF50")
+        add_node(f"{g}\n（净流入）", GROUP_COLOR.get(g, "#4CAF50"))
     for g in in_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
         for i in inds[:TOP_N]:
@@ -241,17 +262,18 @@ def _build_group_capital_path_figure(state_df: pd.DataFrame):
     links_source, links_target, links_value, links_color = [], [], [], []
     for g in out_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] < 0], key=lambda x: x["net"])
+        link_color = _hex_to_rgba(GROUP_COLOR.get(g, "#F44336"), 0.35)
         for i in inds[:TOP_N]:
             links_source.append(node_map[_ind_label(i)])
             links_target.append(node_map[f"{g}\n（净流出）"])
             links_value.append(-i["net"])
-            links_color.append("rgba(244,67,54,0.35)")
+            links_color.append(link_color)
         if len(inds) > TOP_N:
             rv = sum(-i["net"] for i in inds[TOP_N:])
             links_source.append(node_map[f"{g}·其他{len(inds) - TOP_N}行业\n（净流出）"])
             links_target.append(node_map[f"{g}\n（净流出）"])
             links_value.append(rv)
-            links_color.append("rgba(244,67,54,0.25)")
+            links_color.append(_hex_to_rgba(GROUP_COLOR.get(g, "#F44336"), 0.25))
     for g_out, out_v in sources.items():
         for g_in, in_v in sinks.items():
             w = out_v * (in_v / total_out)
@@ -260,20 +282,22 @@ def _build_group_capital_path_figure(state_df: pd.DataFrame):
             links_source.append(node_map[f"{g_out}\n（净流出）"])
             links_target.append(node_map[f"{g_in}\n（净流入）"])
             links_value.append(w)
+            # 组间过渡：不属于任一组，保持原橙色提示「跨组流转」
             links_color.append("rgba(255,152,0,0.3)")
     for g in in_groups:
         inds = sorted([i for i in group_industries.get(g, []) if i["net"] > 0], key=lambda x: -x["net"])
+        link_color = _hex_to_rgba(GROUP_COLOR.get(g, "#4CAF50"), 0.35)
         for i in inds[:TOP_N]:
             links_source.append(node_map[f"{g}\n（净流入）"])
             links_target.append(node_map[_ind_label(i)])
             links_value.append(i["net"])
-            links_color.append("rgba(76,175,80,0.35)")
+            links_color.append(link_color)
         if len(inds) > TOP_N:
             rv = sum(i["net"] for i in inds[TOP_N:])
             links_source.append(node_map[f"{g}\n（净流入）"])
             links_target.append(node_map[f"{g}·其他{len(inds) - TOP_N}行业\n（净流入）"])
             links_value.append(rv)
-            links_color.append("rgba(76,175,80,0.25)")
+            links_color.append(_hex_to_rgba(GROUP_COLOR.get(g, "#4CAF50"), 0.25))
 
     n_ind_nodes = sum(
         (min(len([i for i in group_industries.get(g, []) if i["net"] < 0]), TOP_N)
@@ -334,8 +358,9 @@ def render_group_capital_path(state_df: pd.DataFrame):
 
     st.plotly_chart(result["fig"], width="stretch", key="group_capital_sankey")
     st.caption(
-        "四层结构：左/浅红=流出行业，左中/深红=净流出板块组，右中/深绿=净流入板块组，右/浅绿=流入行业；"
-        "「其他N行业」= 该板块组内资金流其余行业的合计。连线粗细代表迁移强度。"
+        "四层结构：左/浅红=流出行业，左中=净流出板块组，右中=净流入板块组，右/浅绿=流入行业；"
+        "中间层板块组节点按板块组独立配色（大金融/新能源/消费/周期/科技/医药/其他 各一色），"
+        "连线粗细代表迁移强度，组→组过渡为橙色。"
     )
 
 

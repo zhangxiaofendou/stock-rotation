@@ -27,6 +27,7 @@ COMPILE_TARGETS = [
     "data/storage/sqlite_store.py",
     "dashboard/pages/portfolio.py",
     "dashboard/pages/reports.py",
+    "dashboard/pages/mirror_pair.py",
     "data/daily_pipeline.py",
 ]
 
@@ -44,6 +45,7 @@ SUITES = [
     ("数据自动刷新", "tests/selfcheck_auto_refresh.py"),
     ("持仓属性修改", "tests/selfcheck_metadata_edit.py"),
     ("管线目标交易日", "tests/selfcheck_pipeline_target.py"),
+    ("Sankey 板块组配色", "tests/selfcheck_sankey_group_color.py"),
 ]
 
 
