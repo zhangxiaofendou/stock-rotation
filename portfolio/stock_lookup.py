@@ -193,3 +193,46 @@ def lookup_stock_info(code: str) -> Optional[dict]:
 def clear_cache() -> None:
     """清空进程级缓存（测试用）。"""
     _cache.clear()
+
+
+def resolve_sector(sector_name: Optional[str]):
+    """行业名（可能是简称/东财行业名，如「旅游」）→ (sector_code, norm_name, group)。
+
+    把行情带出的行业名自动关联到同花顺 881xxx 行业代码，使持仓分析能按代码命中
+    板块状态机，而不是只有一句简称（如「旅游」）却匹配不到任何板块。
+
+    匹配优先级：
+      1) 精确匹配同花顺行业全名（如「旅游及酒店」）；
+      2) 双向包含匹配（「旅游」⊂「旅游及酒店」）；
+      3) 至少用 classify_em_group 给出板块组。
+    失败/无匹配返回 (None, 原名, "其他")。
+    """
+    if not sector_name:
+        return (None, "", "其他")
+    sn = str(sector_name).strip()
+    try:
+        from config.sector_map import SW_LEVEL2_MAP, classify_em_group
+    except Exception:
+        return (None, sn, "其他")
+    # 归一：去掉常见连接/后缀词，提升简称命中率（「旅游酒店」→「旅游」）
+    _stop = ["及", "酒店", "行业", "产业", "板块", "概念", "指数", "Ⅱ", "I",
+             "（", "）", "(", ")", "etf", "ETF", " "]
+
+    def _core(s: str) -> str:
+        s = str(s).strip()
+        for w in _stop:
+            s = s.replace(w, "")
+        return s
+
+    csn = _core(sn)
+    # 1) 精确匹配
+    for code, (name, grp, _) in SW_LEVEL2_MAP.items():
+        if name == sn:
+            return (code, name, grp)
+    # 2) 双向包含（含去后缀核心词匹配，简称/变体也能命中全名）
+    for code, (name, grp, _) in SW_LEVEL2_MAP.items():
+        cn = _core(name)
+        if (csn and csn in cn) or (cn and cn in csn) or (sn in name) or (name in sn):
+            return (code, name, grp)
+    # 3) 至少给板块组
+    return (None, sn, classify_em_group(sn))

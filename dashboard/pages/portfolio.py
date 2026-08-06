@@ -12,7 +12,7 @@ from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
 from portfolio.holdings import PortfolioHoldings
 from portfolio.advisor import PortfolioAdvisor
-from portfolio.stock_lookup import lookup_stock_info, normalize_code
+from portfolio.stock_lookup import lookup_stock_info, normalize_code, resolve_sector
 from portfolio.fees import estimate_trade_fee
 from dashboard.components.data_source_badge import render_src_badge
 
@@ -167,6 +167,10 @@ def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, stat
     for row in df.to_dict("records"):
         sector_code = str(row.get("sector_code") or "")
         sector_name = str(row.get("sector_name") or row.get("quote_sector_name") or "")
+        # 存量记录若只存了行业名（如「旅游」）没存代码，反查 881xxx 再匹配状态机，
+        # 这样已录入的标的也能正确关联到板块状态，而不是显示「数据不足」。
+        if not sector_code and sector_name:
+            sector_code = resolve_sector(sector_name)[0] or ""
         state_info = state_map.get("code:" + sector_code) or state_map.get("name:" + sector_name)
         state = state_info.get("state") if state_info else None
         profit_pct = row.get("profit_pct")
@@ -187,6 +191,7 @@ def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, stat
             priority, action, reason = "尽快决策", "核验止损条件", f"实时价已触及/低于预设止损价 {float(stop_loss):.2f}，请结合个股逻辑和成交情况核验。"
         rows.append({
             **row,
+            "sector_code": sector_code or row.get("sector_code") or "",
             "sector_state": state or "—",
             "state_date": state_info.get("date") if state_info else "",
             "priority": priority,
@@ -221,6 +226,11 @@ def _render_record_form(service: PortfolioHoldings):
                 if info.get("price"):
                     st.session_state["pl_price"] = float(info["price"])
                 st.session_state["pl_sector_name"] = info.get("sector_name") or ""
+                # 行情带出的行业名（如「旅游」）自动解析成同花顺 881xxx 代码，
+                # 写入 session_state，自动填入「行业代码」框（用户可覆盖）。
+                resolved = resolve_sector(info.get("sector_name")) if info.get("sector_name") else (None, "", "其他")
+                st.session_state["pl_sector_code"] = resolved[0] or ""
+                st.session_state["pl_sector_group"] = resolved[2] or ""
                 st.rerun()
             else:
                 st.session_state.pop("pl_lookup", None)
@@ -231,7 +241,11 @@ def _render_record_form(service: PortfolioHoldings):
             if info.get("price"):
                 tip += f" ｜ 最新价 ¥{float(info['price']):,.2f}"
             if info.get("sector_name"):
+                code = st.session_state.get("pl_sector_code") or ""
+                grp = st.session_state.get("pl_sector_group") or ""
                 tip += f" ｜ 行业 {info['sector_name']}"
+                if code:
+                    tip += f" ｜ 代码 {code}" + (f"（{grp}）" if grp else "")
             st.caption(tip)
 
         with st.form("portfolio_record_trade", clear_on_submit=True):
@@ -270,7 +284,10 @@ def _render_record_form(service: PortfolioHoldings):
                 with a1:
                     sector_name_manual = st.text_input("行业名称（覆盖自动带出）", placeholder="如 白酒Ⅱ")
                 with a2:
-                    sector_code = st.text_input("行业代码", placeholder="如 801780.SI")
+                    sector_code = st.text_input(
+                        "行业代码", value=st.session_state.get("pl_sector_code", ""),
+                        placeholder="如 881160（查询行情后自动带出，可改）",
+                    )
                 with a3:
                     target_weight = st.number_input("目标仓位 %", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
                 a4, a5 = st.columns([1, 2])
@@ -296,6 +313,11 @@ def _render_record_form(service: PortfolioHoldings):
                 if price <= 0:
                     raise ValueError("成交价不能为 0，且未能自动获取最新价。请手动填写成交价")
                 sector_name = sector_name_manual.strip() or (auto or {}).get("sector_name")
+                # 行情带出的行业名可能是简称（如「旅游」）。未手填行业代码时，用它反查
+                # 881xxx 代码；行业名保留行情原值以便展示，关联靠代码命中状态机。
+                auto_code = None
+                if not sector_code.strip() and sector_name:
+                    auto_code = resolve_sector(sector_name)[0]
                 service.record_trade(
                     security_code=code,
                     security_name=name,
@@ -304,7 +326,7 @@ def _render_record_form(service: PortfolioHoldings):
                     price=price,
                     trade_date=trade_date.isoformat(),
                     fee=fee,
-                    sector_code=sector_code.strip() or None,
+                    sector_code=(sector_code.strip() or auto_code) or None,
                     sector_name=sector_name or None,
                     asset_type=(auto or {}).get("asset_type") or "stock",
                     target_weight=target_weight / 100 if target_weight else None,
@@ -418,10 +440,10 @@ def _render_position_analysis(service: PortfolioHoldings, positions: pd.DataFram
     c1.metric("尽快决策", f"{urgent} 只")
     c2.metric("优先复核", f"{review} 只")
     c3.metric("观察/持有", f"{observe} 只")
-    view = analysis[["priority", "security_code", "security_name", "sector_name", "sector_state", "market_price", "profit_pct", "action", "reason"]].copy()
+    view = analysis[["priority", "security_code", "security_name", "sector_name", "sector_code", "sector_state", "market_price", "profit_pct", "action", "reason"]].copy()
     view = view.rename(columns={
         "priority": "优先级", "security_code": "代码", "security_name": "名称", "sector_name": "所属行业",
-        "sector_state": "板块状态", "market_price": "现价", "profit_pct": "收益率", "action": "建议动作", "reason": "分析依据",
+        "sector_code": "行业代码", "sector_state": "板块状态", "market_price": "现价", "profit_pct": "收益率", "action": "建议动作", "reason": "分析依据",
     })
     view["现价"] = view["现价"].map(lambda x: f"¥{x:,.2f}" if pd.notna(x) else "暂无")
     view["收益率"] = view["收益率"].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "暂无")
