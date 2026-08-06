@@ -46,6 +46,7 @@ SUITES = [
     ("持仓属性修改", "tests/selfcheck_metadata_edit.py"),
     ("管线目标交易日", "tests/selfcheck_pipeline_target.py"),
     ("Sankey 板块组配色", "tests/selfcheck_sankey_group_color.py"),
+    ("行情 per-code 缓存", "tests/selfcheck_quote_cache.py"),
 ]
 
 

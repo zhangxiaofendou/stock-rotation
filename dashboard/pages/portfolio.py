@@ -1,6 +1,7 @@
 """持仓管理页面：记录真实持仓、查看成本口径的组合概览和操作日志。"""
 
 from datetime import date
+import time
 
 import numpy as np
 import pandas as pd
@@ -32,18 +33,19 @@ def load_sector_states_for_portfolio() -> pd.DataFrame:
     return StateMachine(ParquetStore(), SQLiteStore()).calc_all_sectors_state()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
-def load_live_quotes_for_portfolio(codes: tuple[str, ...]) -> pd.DataFrame:
-    """读取当前持仓实时行情；失败返回空表，不把行情写入持仓账本。
+def _fetch_quotes_batch(codes: tuple[str, ...]) -> list[dict]:
+    """批量拉取一组代码的实时行情（东财主源 + 腾讯兜底）。
 
-    主源：东方财富 push2（股票）。
-    兜底：腾讯 qt.gtimg.cn（东财限流或对 ETF 拒绝时自动回退，对 ETF 稳定）。
-    仍然拿不到价的代码会被自然丢弃，由页面渲染层显示「暂无行情」。
+    抽离为纯函数，由 ``load_live_quotes_for_portfolio`` 只针对缺失标的调用；
+    不按整个持仓集合缓存，避免「删一笔 → 集合变化 → 整批行情重拉」的卡顿。
     """
     from data.sources.eastmoney_source import EastMoneyLiveSource, _secid_of_stock
     from portfolio.stock_lookup import _fetch_tencent  # 复用腾讯解析逻辑
 
+    codes = tuple(codes)
     rows: list[dict] = []
+    if not codes:
+        return rows
     code_to_secid: dict[str, str] = {}
     for code in codes:
         sid = _secid_of_stock(code)
@@ -100,10 +102,36 @@ def load_live_quotes_for_portfolio(codes: tuple[str, ...]) -> pd.DataFrame:
             "quote_pct": np.nan,
             "quote_source": "tencent_realtime",
         })
-    return pd.DataFrame(rows, columns=[
-        "security_code", "market_price", "quote_name",
-        "quote_sector_name", "quote_pct", "quote_source",
-    ])
+    return rows
+
+
+_QUOTE_TTL = 300  # 单标的行情缓存时长（秒）
+
+
+def load_live_quotes_for_portfolio(codes: tuple[str, ...]) -> pd.DataFrame:
+    """读取当前持仓实时行情；失败返回空表，不把行情写入持仓账本。
+
+    按 code 做 per-code TTL 缓存（存于 session_state）：删除单个标的只让该
+    code 的缓存失效，其余标的命中缓存，不会触发「删一笔 -> 整批行情重拉」的卡顿。
+    """
+    cols = ["security_code", "market_price", "quote_name", "quote_sector_name", "quote_pct", "quote_source"]
+    codes = tuple(str(c) for c in codes)
+    if not codes:
+        return pd.DataFrame(columns=cols)
+    cache = st.session_state.setdefault("_quote_cache", {})
+    now = time.time()
+    fresh, missing = [], []
+    for c in codes:
+        ent = cache.get(c)
+        if ent and (now - ent["t"]) < _QUOTE_TTL:
+            fresh.append(ent["row"])
+        else:
+            missing.append(c)
+    if missing:
+        for r in _fetch_quotes_batch(tuple(missing)):
+            cache[r["security_code"]] = {"t": now, "row": r}
+            fresh.append(r)
+    return pd.DataFrame(fresh, columns=cols)
 
 
 def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, states: pd.DataFrame) -> pd.DataFrame:
@@ -441,20 +469,40 @@ def _render_pending_items(service: PortfolioHoldings):
     )
 
 
+def _set_editing_tx(tid: int):
+    """点「编辑」时记录正在编辑的流水 id，仅展开那一笔的完整表单。"""
+    st.session_state["editing_tx_id"] = tid
+
+
 def _render_transactions(service: PortfolioHoldings):
     st.subheader("逐笔操作记录")
     render_src_badge("derived", base=["user"])
-    st.caption("同一标的的多次操作会自动聚合；修改或删除流水后，当前持仓会重新计算。")
+    st.caption("同一标的的多次操作会自动聚合；修改或删除流水后，当前持仓会重新计算。点「编辑」才展开该笔表单，减少页面组件数，删除/修改更顺滑。")
     transactions = service.transactions()
     if transactions.empty:
         st.caption("暂无实际操作记录。")
         return
+    editing_id = st.session_state.get("editing_tx_id")
     for code, group in transactions.groupby("security_code", sort=False):
         with st.expander(f"{code} · {group.iloc[0]['security_name']}（{len(group)} 笔）"):
             for _, row in group.iterrows():
-                tid = int(row["id"]); st.write(f"{row['trade_date']}｜{'买入' if row['side']=='BUY' else '卖出' if row['side']=='SELL' else '调账'}｜数量 {row['quantity']:g}｜价格 ¥{row['price']:.4f}")
+                tid = int(row["id"])
+                st.write(f"{row['trade_date']}｜{'买入' if row['side']=='BUY' else '卖出' if row['side']=='SELL' else '调账'}｜数量 {row['quantity']:g}｜价格 ¥{row['price']:.4f}")
                 c1, c2 = st.columns(2)
                 with c1:
+                    st.button("编辑", key=f"edit_tx_{tid}", on_click=_set_editing_tx, args=(tid,))
+                with c2:
+                    if st.button("删除这笔记录", key=f"delete_tx_{tid}"):
+                        try:
+                            service.delete_transaction(tid)
+                            if st.session_state.get("editing_tx_id") == tid:
+                                st.session_state.pop("editing_tx_id", None)
+                            st.success("已删除并重新聚合")
+                            # 删除在 fragment 内执行，fragment 重跑即刷新本区与上方持仓表，不整页重跑
+                        except Exception as exc:
+                            st.error(f"删除失败：{exc}")
+                # 仅当前正在编辑的那一笔展开完整表单，其余只保留按钮（大幅减少组件数）
+                if editing_id == tid:
                     with st.form(f"edit_tx_{tid}"):
                         nd = st.date_input("日期", value=pd.to_datetime(row["trade_date"]).date())
                         ns = st.selectbox("操作", ["BUY", "SELL", "ADJUST"], index=["BUY", "SELL", "ADJUST"].index(row["side"]), format_func={"BUY":"买入", "SELL":"卖出", "ADJUST":"调账"}.get)
@@ -463,12 +511,29 @@ def _render_transactions(service: PortfolioHoldings):
                         nf = st.number_input("费用", min_value=0.0, value=float(row["fee"]), format="%.2f")
                         nn = st.text_area("备注", value=row["note"] or "")
                         if st.form_submit_button("保存修改", type="primary"):
-                            try: service.update_transaction(tid, trade_date=nd.isoformat(), side=ns, quantity=nq, price=np, fee=nf, note=nn or None); st.success("已修改并重新聚合"); st.rerun()
-                            except Exception as exc: st.error(f"修改失败：{exc}")
-                with c2:
-                    if st.button("删除这笔记录", key=f"delete_tx_{tid}"):
-                        try: service.delete_transaction(tid); st.success("已删除并重新聚合"); st.rerun()
-                        except Exception as exc: st.error(f"删除失败：{exc}")
+                            try:
+                                service.update_transaction(tid, trade_date=nd.isoformat(), side=ns, quantity=nq, price=np, fee=nf, note=nn or None)
+                                st.session_state.pop("editing_tx_id", None)
+                                st.success("已修改并重新聚合")
+                                # fragment 重跑即刷新
+                            except Exception as exc:
+                                st.error(f"修改失败：{exc}")
+
+
+@st.fragment
+def _frag_holdings(service: PortfolioHoldings):
+    """持仓表 + 分析 + 待办 + 逐笔记录作为独立 fragment。
+
+    删除/修改交易只重跑本 fragment（不整页、不重建录入表单、不重拉整批行情），
+    解决了「删一笔卡很久」的问题。
+    """
+    positions, quotes = _render_positions(service)
+    st.markdown("---")
+    _render_position_analysis(service, positions, quotes)
+    st.markdown("---")
+    _render_pending_items(service)
+    st.markdown("---")
+    _render_transactions(service)
 
 
 def render():
@@ -482,11 +547,6 @@ def render():
         return
     service = get_holdings_service(user_id=user_id)
     st.info(f"👤 当前账户：**{user_id}**（仅显示你自己的持仓）")
-    positions, quotes = _render_positions(service)
+    _frag_holdings(service)
     st.markdown("---")
-    _render_position_analysis(service, positions, quotes)
     _render_record_form(service)
-    st.markdown("---")
-    _render_pending_items(service)
-    st.markdown("---")
-    _render_transactions(service)
