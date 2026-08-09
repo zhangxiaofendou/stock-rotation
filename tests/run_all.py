@@ -24,6 +24,7 @@ COMPILE_TARGETS = [
     "portfolio/stock_lookup.py",
     "report/generator.py",
     "data/storage/pg_store.py",
+    "data/storage/parquet_mirror.py",
     "data/storage/sqlite_store.py",
     "dashboard/pages/portfolio.py",
     "dashboard/pages/reports.py",
@@ -49,6 +50,7 @@ SUITES = [
     ("行情 per-code 缓存", "tests/selfcheck_quote_cache.py"),
     ("行业名→代码关联", "tests/selfcheck_sector_resolve.py"),
     ("实时行情条 fragment 刷新", "tests/selfcheck_realtime_fragment.py"),
+    ("parquet 云端镜像", "tests/selfcheck_parquet_mirror.py"),
 ]
 
 

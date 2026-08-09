@@ -531,6 +531,15 @@ def main():
         return
     st.session_state["username"] = current_user
 
+    # Reboot/重部署后临时磁盘清空：先从云库镜像秒级拉回最新基数据，
+    # 再交给原自动刷新判缺补漏（通常只需补当天缺口，甚至直接跳过）。
+    # 防御式：失败仅记录，绝不阻断页面渲染。
+    try:
+        from data.storage.parquet_mirror import restore_parquet_from_mirror
+        restore_parquet_from_mirror()
+    except Exception:
+        logger.warning("启动恢复 parquet 镜像失败（走原自动刷新逻辑）", exc_info=True)
+
     # Reboot/重部署后 Git seed 会覆盖本地最新 parquet，自动恢复到最新数据
     _maybe_auto_refresh_on_stale()
 

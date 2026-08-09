@@ -696,6 +696,13 @@ def main():
             )
         except Exception:
             pass
+        # 管线收尾：把最新派生 parquet 镜像进云库，供 Reboot 后秒级恢复基数据
+        # （防御式：失败仅记录，不影响主管线）
+        try:
+            from data.storage.parquet_mirror import upload_parquet_mirror
+            upload_parquet_mirror()
+        except Exception:
+            logger.warning("管线收尾：parquet 镜像上传失败（非致命）", exc_info=True)
 
 
 if __name__ == "__main__":
