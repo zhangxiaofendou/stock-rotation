@@ -500,6 +500,20 @@ def render_realtime_ticker(live: bool):
     )
 
 
+@st.fragment
+def _render_realtime_ticker_fragment(live: bool):
+    """实时行情条自包含刷新：用 fragment 局部重跑，避免整页每 20s 重算拖慢所有交互。
+
+    原实现在 main() 末尾 `time.sleep(20); st.rerun()` 整页重跑，导致一旦勾选「盘中实时刷新」，
+    整个 app 每 20 秒从头执行一遍，用户点击被整页重跑节奏干扰，表现为「点一下转半天」。
+    改为 fragment 后，只有行情条这一小块按 20s 局部刷新，主页面（含各业务 tab）保持静态。
+    """
+    render_realtime_ticker(live)
+    if live:
+        time.sleep(REALTIME_INTERVAL)
+        st.rerun(scope="fragment")
+
+
 def main():
     """主入口"""
     # 页面配置
@@ -585,6 +599,14 @@ def main():
             help="开启后行情条在交易时段每 20 秒自动刷新；需同花顺源且网络可达。",
         )
 
+        # 后台数据管线运行时不与实时刷新抢网络：自动暂停盘中实时刷新
+        _pipeline_running = False
+        try:
+            _pipeline_running = _load_progress().get("status") == "running"
+        except Exception:
+            pass
+        effective_live = live_realtime and not _pipeline_running
+
         # 各数据类型最新日期明细
         if summary_df is not None and not summary_df.empty:
             st.markdown("##### 各数据类型最新日期")
@@ -637,7 +659,7 @@ def main():
     # ================================================================
     # 顶部盘中实时行情条
     # ================================================================
-    render_realtime_ticker(live_realtime)
+    _render_realtime_ticker_fragment(effective_live)
 
     # ================================================================
     # 页面路由
@@ -661,10 +683,8 @@ def main():
         from dashboard.pages.reports import render
         render()
 
-    # 盘中实时自动刷新：渲染完整个页面后统一休眠并重跑（避免遮挡当前页）
-    if live_realtime:
-        time.sleep(REALTIME_INTERVAL)
-        st.rerun()
+    # 盘中实时自动刷新已下放到 _render_realtime_ticker_fragment（fragment 局部重跑），
+    # 主页面不再因实时刷新而整页重算，避免「点一下转半天」。
 
 
 if __name__ == "__main__":
