@@ -27,6 +27,7 @@ COMPILE_TARGETS = [
     "data/storage/parquet_mirror.py",
     "data/storage/sqlite_store.py",
     "dashboard/pages/portfolio.py",
+    "model/state_history.py",
     "dashboard/pages/reports.py",
     "dashboard/pages/mirror_pair.py",
     "data/daily_pipeline.py",
@@ -51,6 +52,8 @@ SUITES = [
     ("行业名→代码关联", "tests/selfcheck_sector_resolve.py"),
     ("实时行情条 fragment 刷新", "tests/selfcheck_realtime_fragment.py"),
     ("parquet 云端镜像", "tests/selfcheck_parquet_mirror.py"),
+    ("九宫格状态历史", "tests/selfcheck_state_history.py"),
+    ("持仓九宫格与状态轨迹", "tests/selfcheck_portfolio_grid.py"),
 ]
 
 

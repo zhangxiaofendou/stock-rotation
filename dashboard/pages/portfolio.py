@@ -5,16 +5,25 @@ import time
 
 import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import streamlit as st
 
 from data.storage.parquet_store import ParquetStore
 from data.storage.sqlite_store import SQLiteStore
 from model.state_machine import StateMachine
+from model.state_history import (
+    STATE_CELL,
+    X_LABELS,
+    Y_LABELS,
+    recent_state_runs,
+    format_runs_path,
+)
 from portfolio.holdings import PortfolioHoldings
 from portfolio.advisor import PortfolioAdvisor
 from portfolio.stock_lookup import lookup_stock_info, normalize_code, resolve_sector
 from portfolio.fees import estimate_trade_fee
 from dashboard.components.data_source_badge import render_src_badge
+from dashboard.components.state_grid import STATE_COLORS
 
 
 @st.cache_resource
@@ -426,7 +435,7 @@ def _render_position_analysis(service: PortfolioHoldings, positions: pd.DataFram
     render_src_badge("derived", base=["user", "eastmoney_realtime", "sector_state"])
     if positions.empty:
         st.info("录入持仓后，这里会按每只股票的板块状态、浮盈亏和止损条件生成左侧交易建议。")
-        return
+        return pd.DataFrame()
     try:
         states = load_sector_states_for_portfolio()
     except Exception:
@@ -451,6 +460,291 @@ def _render_position_analysis(service: PortfolioHoldings, positions: pd.DataFram
         "分析依据": st.column_config.TextColumn(width="large"),
         "建议动作": st.column_config.TextColumn(width="medium"),
     })
+    return analysis
+
+
+# ================================================================
+# 持仓行业九宫格分布 + 状态变化轨迹
+# ================================================================
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_state_series_cached(sector_code: str) -> pd.DataFrame:
+    """按行业代码缓存历史状态序列，避免每次 rerun 重复读 RS/趋势 parquet。"""
+    try:
+        series = StateMachine(ParquetStore(), SQLiteStore()).calc_state_series(sector_code)
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+    if series is None or series.empty:
+        return pd.DataFrame()
+    return series[["date", "state"]].copy()
+
+
+def _grid_offsets(k: int) -> list[tuple]:
+    """同一格内 k 个点的确定性错位偏移（环形排布）。
+
+    不用随机偏移：随机会让点在每次 rerun 后跳位置，无法对照上一次读图。
+    """
+    if k <= 1:
+        return [(0.0, 0.0)]
+    import math
+    radius = 0.16 if k <= 4 else 0.24
+    return [
+        (radius * math.cos(2 * math.pi * i / k), radius * math.sin(2 * math.pi * i / k))
+        for i in range(k)
+    ]
+
+
+def _hex_rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+def _render_portfolio_grid(analysis: pd.DataFrame):
+    """把持仓标的按其所属行业的九宫格状态，画在 3×3 网格上。"""
+    st.subheader("持仓行业九宫格分布")
+    render_src_badge("derived", base=["user", "sector_state"])
+    if analysis is None or analysis.empty:
+        st.info("录入持仓后，这里会显示每只标的所属行业落在九宫格的哪个位置。")
+        return
+
+    df = analysis.copy()
+    df["_cell"] = df["sector_state"].map(lambda s: STATE_CELL.get(str(s)))
+    placed = df[df["_cell"].notna()].copy()
+    missing = df[df["_cell"].isna()]
+
+    if placed.empty:
+        st.warning(
+            f"当前 {len(df)} 只持仓都还没关联到行业状态，无法定位九宫格。"
+            "可在上方「修改标的元数据」补一个 881xxx 板块代码，或等数据管线补齐行业状态。"
+        )
+        return
+
+    placed["gx"] = placed["_cell"].map(lambda c: c[0])
+    placed["gy"] = placed["_cell"].map(lambda c: c[1])
+
+    fig = go.Figure()
+
+    # 背景格子 + 格子标题
+    cell_stat = {}
+    for (gx, gy), grp in placed.groupby(["gx", "gy"]):
+        mv = pd.to_numeric(grp.get("market_value"), errors="coerce").sum()
+        cell_stat[(gx, gy)] = (len(grp), float(mv) if pd.notna(mv) else 0.0)
+
+    for state, (x, y) in STATE_CELL.items():
+        color = STATE_COLORS.get(state, "#9E9E9E")
+        cnt, mv = cell_stat.get((x, y), (0, 0.0))
+        # 有持仓的格子底色更明显，空格子淡化，一眼看出仓位聚在哪
+        fig.add_shape(
+            type="rect", x0=x - 0.5, x1=x + 0.5, y0=y - 0.5, y1=y + 0.5,
+            line={"color": color if cnt else "#DDDDDD", "width": 2 if cnt else 0.6},
+            fillcolor=_hex_rgba(color, 0.16 if cnt else 0.04),
+            layer="below",
+        )
+        fig.add_annotation(
+            x=x, y=y + 0.42, text=f"<b>{state}</b>", showarrow=False,
+            font={"size": 12, "color": color},
+        )
+        label = f"{cnt} 只 · ¥{mv:,.0f}" if cnt else "无持仓"
+        fig.add_annotation(
+            x=x, y=y - 0.42,
+            text=f"<span style='color:{'#333' if cnt else '#BBB'};font-size:11px'>{label}</span>",
+            showarrow=False,
+        )
+
+    # 持仓散点：颜色随盈亏（A股习惯 红涨绿跌），大小随市值
+    xs, ys, texts, colors, sizes, custom = [], [], [], [], [], []
+    mv_series = pd.to_numeric(placed.get("market_value"), errors="coerce")
+    mv_max = float(mv_series.max()) if mv_series.notna().any() else 0.0
+    for (gx, gy), grp in placed.groupby(["gx", "gy"]):
+        offs = _grid_offsets(len(grp))
+        for (dx, dy), (_, row) in zip(offs, grp.iterrows()):
+            xs.append(gx + dx)
+            ys.append(gy + dy)
+            texts.append(str(row.get("security_name") or row.get("security_code") or "")[:6])
+            pct = pd.to_numeric(pd.Series([row.get("profit_pct")]), errors="coerce").iloc[0]
+            if pd.isna(pct):
+                colors.append("#9E9E9E")
+            else:
+                colors.append("#e23c3c" if pct >= 0 else "#16a34a")
+            mv = pd.to_numeric(pd.Series([row.get("market_value")]), errors="coerce").iloc[0]
+            if pd.isna(mv) or mv_max <= 0:
+                sizes.append(14)
+            else:
+                sizes.append(12 + 20 * (float(mv) / mv_max) ** 0.5)
+            custom.append([
+                str(row.get("security_code") or ""),
+                str(row.get("security_name") or ""),
+                str(row.get("sector_name") or "—"),
+                str(row.get("sector_code") or "—"),
+                str(row.get("sector_state") or "—"),
+                f"¥{float(mv):,.0f}" if pd.notna(mv) else "暂无",
+                f"{float(pct):+.2f}%" if pd.notna(pct) else "暂无",
+            ])
+
+    fig.add_trace(go.Scatter(
+        x=xs, y=ys, mode="markers+text",
+        text=texts, textposition="bottom center",
+        textfont={"size": 10, "color": "#444"},
+        marker={"size": sizes, "color": colors, "opacity": 0.85,
+                "line": {"width": 1.5, "color": "white"}},
+        customdata=custom,
+        hovertemplate=(
+            "<b>%{customdata[1]}</b>（%{customdata[0]}）<br>"
+            "行业：%{customdata[2]}　%{customdata[3]}<br>"
+            "行业状态：%{customdata[4]}<br>"
+            "市值：%{customdata[5]}　收益率：%{customdata[6]}"
+            "<extra></extra>"
+        ),
+        showlegend=False,
+    ))
+
+    fig.update_layout(
+        xaxis={"tickmode": "array", "tickvals": [0, 1, 2], "ticktext": X_LABELS,
+               "title": "RS 相对强弱动量方向 →", "range": [-0.75, 2.75],
+               "zeroline": False, "showgrid": False},
+        yaxis={"tickmode": "array", "tickvals": [0, 1, 2], "ticktext": Y_LABELS,
+               "title": "价格趋势 ↑", "range": [-0.75, 2.75],
+               "zeroline": False, "showgrid": False},
+        height=560, margin={"l": 60, "r": 20, "t": 20, "b": 60},
+        plot_bgcolor="white", paper_bgcolor="white",
+        hovermode="closest",
+    )
+    st.plotly_chart(fig, width="stretch")
+    st.caption(
+        "点＝一只持仓标的，按其**所属行业**的九宫格状态定位（同格内环形错开，位置固定不随刷新跳动）。"
+        "点的颜色：🔴 浮盈 / 🟢 浮亏；点的大小：市值占比。"
+        "格子定位直接取自状态标签，不用原始 RS 分位反推——状态机含横截面闸门与斜率门槛的降级逻辑，"
+        "按分位反推会让点落错格子。"
+    )
+
+    if not missing.empty:
+        names = "、".join(
+            f"{r.get('security_name') or r.get('security_code')}" for _, r in missing.iterrows()
+        )
+        st.warning(
+            f"⚠️ {len(missing)} 只标的未能关联行业状态，未在图中显示：{names}。"
+            "可在上方「✏️ 修改标的元数据」里补填板块代码（881xxx）。"
+        )
+
+
+def _render_state_transitions(analysis: pd.DataFrame, n_changes: int = 3):
+    """展示每个持仓行业最近 n 次九宫格状态变化：变化日期 + 每段持续时间。"""
+    st.subheader(f"持仓行业状态变化轨迹（近 {n_changes} 次）")
+    render_src_badge("derived", base=["ths_kline", "sector_state"])
+    if analysis is None or analysis.empty:
+        st.info("录入持仓后，这里会展示每个持仓行业最近几次九宫格状态切换的日期与持续时间。")
+        return
+
+    # 状态是行业级的：按行业去重，避免同行业多只标的重复计算
+    df = analysis.copy()
+    df["sector_code"] = df["sector_code"].astype(str)
+    sectors = {}
+    for row in df.to_dict("records"):
+        code = str(row.get("sector_code") or "").strip()
+        if not code:
+            continue
+        entry = sectors.setdefault(code, {
+            "sector_name": str(row.get("sector_name") or "") or code,
+            "holdings": [],
+        })
+        entry["holdings"].append(str(row.get("security_name") or row.get("security_code") or ""))
+
+    if not sectors:
+        st.warning("当前持仓都没有可用的行业代码，无法追溯状态变化。请先在「修改标的元数据」补填 881xxx 板块代码。")
+        return
+
+    summary_rows, runs_map, detail_rows = [], {}, []
+    for code, info in sectors.items():
+        series = load_state_series_cached(code)
+        runs = recent_state_runs(series, n_changes=n_changes)
+        if not runs:
+            summary_rows.append({
+                "行业": info["sector_name"], "行业代码": code,
+                "持有标的": "、".join(info["holdings"]),
+                "当前状态": "—", "已持续": "—", "最近变化日": "—",
+                f"近 {n_changes} 次状态变化": "暂无历史状态数据",
+            })
+            continue
+        runs_map[code] = (info, runs)
+        cur = runs[-1]
+        changed_on = runs[-1]["start_date"] if len(runs) > 1 else "—"
+        summary_rows.append({
+            "行业": info["sector_name"], "行业代码": code,
+            "持有标的": "、".join(info["holdings"]),
+            "当前状态": cur["state"],
+            "已持续": f"{'≥' if cur.get('truncated_start') else ''}{cur['trading_days']} 个交易日",
+            "最近变化日": changed_on,
+            f"近 {n_changes} 次状态变化": format_runs_path(runs),
+        })
+        for r in runs:
+            detail_rows.append({
+                "行业": info["sector_name"], "行业代码": code, "状态": r["state"],
+                "进入日期": ("（数据起点）" if r.get("truncated_start") else "") + r["start_date"],
+                "结束日期": "至今" if r["is_current"] else r["end_date"],
+                "持续交易日": r["trading_days"],
+                "持续自然日": r["calendar_days"],
+                "是否当前": "✅ 当前" if r["is_current"] else "",
+            })
+
+    st.dataframe(
+        pd.DataFrame(summary_rows), hide_index=True, width="stretch",
+        column_config={
+            f"近 {n_changes} 次状态变化": st.column_config.TextColumn(width="large"),
+            "持有标的": st.column_config.TextColumn(width="medium"),
+        },
+    )
+    st.caption(
+        "「已持续」按交易日计。带 ≥ 表示该状态在可用历史数据的起点就已存在，实际开始更早。"
+        "状态为行业级信号，同一行业下的多只标的共用一条轨迹。"
+    )
+
+    if runs_map:
+        _render_transition_timeline(runs_map)
+        with st.expander("📋 状态变化明细（每段的进入/结束日期与持续时间）", expanded=False):
+            st.dataframe(pd.DataFrame(detail_rows), hide_index=True, width="stretch")
+
+
+def _render_transition_timeline(runs_map: dict):
+    """状态变化甘特时间线：每行一个行业，色块=一个状态段。"""
+    fig = go.Figure()
+    y_labels, seen_states = [], set()
+    for code, (info, runs) in runs_map.items():
+        label = f"{info['sector_name']}({code})"
+        y_labels.append(label)
+        for r in runs:
+            start = pd.Timestamp(r["start_date"])
+            # 色块延伸到结束日的次日 0 点，视觉上覆盖完整的最后一天
+            end = pd.Timestamp(r["end_date"]) + pd.Timedelta(days=1)
+            width_ms = (end - start).total_seconds() * 1000.0
+            color = STATE_COLORS.get(r["state"], "#9E9E9E")
+            show_legend = r["state"] not in seen_states
+            seen_states.add(r["state"])
+            fig.add_trace(go.Bar(
+                y=[label], x=[width_ms], base=[start], orientation="h",
+                marker={"color": color, "line": {"color": "white", "width": 1}},
+                name=r["state"], legendgroup=r["state"], showlegend=show_legend,
+                hovertemplate=(
+                    f"<b>{info['sector_name']}</b><br>"
+                    f"状态：{r['state']}<br>"
+                    f"进入：{r['start_date']}<br>"
+                    f"结束：{'至今' if r['is_current'] else r['end_date']}<br>"
+                    f"持续：{r['trading_days']} 个交易日（{r['calendar_days']} 自然日）"
+                    "<extra></extra>"
+                ),
+            ))
+
+    fig.update_layout(
+        barmode="stack",
+        height=max(220, 46 * len(y_labels) + 130),
+        margin={"l": 10, "r": 20, "t": 10, "b": 40},
+        xaxis={"type": "date", "title": "日期", "showgrid": True, "gridcolor": "#EEEEEE"},
+        yaxis={"autorange": "reversed", "title": ""},
+        plot_bgcolor="white", paper_bgcolor="white",
+        legend={"orientation": "h", "yanchor": "bottom", "y": -0.35,
+                "xanchor": "center", "x": 0.5},
+        bargap=0.35,
+    )
+    st.plotly_chart(fig, width="stretch")
 
 
 def _render_pending_items(service: PortfolioHoldings):
@@ -551,7 +845,11 @@ def _frag_holdings(service: PortfolioHoldings):
     """
     positions, quotes = _render_positions(service)
     st.markdown("---")
-    _render_position_analysis(service, positions, quotes)
+    analysis = _render_position_analysis(service, positions, quotes)
+    st.markdown("---")
+    _render_portfolio_grid(analysis)
+    st.markdown("---")
+    _render_state_transitions(analysis)
     st.markdown("---")
     _render_pending_items(service)
     st.markdown("---")
