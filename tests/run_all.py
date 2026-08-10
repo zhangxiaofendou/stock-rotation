@@ -27,6 +27,7 @@ COMPILE_TARGETS = [
     "data/storage/parquet_mirror.py",
     "data/storage/sqlite_store.py",
     "dashboard/pages/portfolio.py",
+    "dashboard/components/version_indicator.py",
     "model/state_history.py",
     "dashboard/pages/reports.py",
     "dashboard/pages/mirror_pair.py",
@@ -55,6 +56,7 @@ SUITES = [
     ("九宫格状态历史", "tests/selfcheck_state_history.py"),
     ("持仓九宫格与状态轨迹", "tests/selfcheck_portfolio_grid.py"),
     ("实时批量+行业回退", "tests/selfcheck_eastmoney_batch.py"),
+    ("部署版本角标+名称归一化兜底", "tests/selfcheck_version_and_normalized_match.py"),
 ]
 
 

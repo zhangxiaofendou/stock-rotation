@@ -1,6 +1,7 @@
 """持仓管理页面：记录真实持仓、查看成本口径的组合概览和操作日志。"""
 
 from datetime import date
+import re
 import time
 
 import numpy as np
@@ -24,6 +25,7 @@ from portfolio.stock_lookup import lookup_stock_info, normalize_code, resolve_se
 from portfolio.fees import estimate_trade_fee
 from dashboard.components.data_source_badge import render_src_badge
 from dashboard.components.state_grid import STATE_COLORS
+from dashboard.components.version_indicator import render_version_indicator
 
 
 @st.cache_resource
@@ -143,6 +145,27 @@ def load_live_quotes_for_portfolio(codes: tuple[str, ...]) -> pd.DataFrame:
     return pd.DataFrame(fresh, columns=cols)
 
 
+def _substr_lookup(name_index: dict, query: str):
+    """name_index 里找不到时，按「互为子串」回退一次。
+
+    让简称/全称变体互通（「旅游」⊂「旅游及酒店」）。
+    仅当前面所有精确查都失败时才走这里；只用「互为子串」匹配，**不**做
+    前缀匹配——否则「板块三」会误中「板块一」「板块二」。
+    """
+    if not query:
+        return None
+    q = str(query).strip()
+    if len(q) < 2:
+        return None
+    # 仅在「互为子串」且 query 非空时返回第一个命中
+    for k, v in name_index.items():
+        if not k:
+            continue
+        if q in k or k in q:
+            return v
+    return None
+
+
 def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, states: pd.DataFrame) -> pd.DataFrame:
     """合并成本、实时行情、行业状态，生成左侧交易者的条件式建议。"""
     if positions.empty:
@@ -159,6 +182,7 @@ def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, stat
     df["profit_pct"] = (df["market_price"] / df["avg_cost"] - 1.0) * 100.0
 
     state_map = {}
+    name_index = {}  # 归一化名 → payload，兼容 "IT服务Ⅱ" vs "IT服务" 等变体
     if states is not None and not states.empty:
         for row in states.to_dict("records"):
             code = str(row.get("sector_code") or "")
@@ -168,6 +192,13 @@ def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, stat
                 state_map["code:" + code] = payload
             if name:
                 state_map["name:" + name] = payload
+                # 归一化索引：去掉 Ⅱ / 及 / 行业 / 板块 等连接后缀，简称/全称互通
+                norm = re.sub(r"[ⅡI()（）]|及|行业|产业|板块|概念|指数|\s", "", name)
+                if norm:
+                    name_index[norm] = payload
+                # 同时存原始名作为子串索引：让 "旅游" 这种简称能命中 "旅游及酒店" 全名
+                if name and name not in name_index:
+                    name_index[name] = payload
 
     risk_states = {"①领涨减速", "③加速冲顶", "④强转弱", "⑦持续杀跌", "⑧下跌中继"}
     weak_states = {"④强转弱", "⑦持续杀跌", "⑧下跌中继"}
@@ -188,7 +219,14 @@ def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, stat
         # 这样已录入的标的也能正确关联到板块状态，而不是显示「数据不足」。
         if not sector_code and sector_name:
             sector_code = resolve_sector(sector_name)[0] or ""
-        state_info = state_map.get("code:" + sector_code) or state_map.get("name:" + sector_name)
+        # 三级兜底：code → name 原样 → name 归一化（兼容 Ⅱ / 及 / 行业 等变体）
+        state_info = (
+            state_map.get("code:" + sector_code)
+            or state_map.get("name:" + sector_name)
+            or name_index.get(re.sub(r"[ⅡI()（）]|及|行业|产业|板块|概念|指数|\s", "", sector_name))
+            or name_index.get(sector_name)
+            or _substr_lookup(name_index, sector_name)
+        )
         state = state_info.get("state") if state_info else None
         profit_pct = row.get("profit_pct")
         stop_loss = row.get("stop_loss")
@@ -868,6 +906,7 @@ def _frag_holdings(service: PortfolioHoldings):
 def render():
     """持仓管理主入口。"""
     st.title("💼 持仓管理")
+    render_version_indicator()
     st.caption("管理你真实持有的标的与实际操作；通用行业信号仍以板块轮动监控中的状态机展示为准。")
     # 多用户：从登录会话取当前用户，确保只看自己的仓位
     user_id = st.session_state.get("username", "")
