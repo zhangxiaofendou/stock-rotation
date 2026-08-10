@@ -176,6 +176,14 @@ def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, stat
     for row in df.to_dict("records"):
         sector_code = str(row.get("sector_code") or "")
         sector_name = str(row.get("sector_name") or row.get("quote_sector_name") or "")
+        # 存量录入时若未带出行业、且本次实时批拉又没带出（多 secid 批量偶发丢行），
+        # 按 code 单独补一次，确保不会永远停在「数据不足」。
+        if not sector_name:
+            try:
+                info = lookup_stock_info(str(row.get("security_code") or ""))
+                sector_name = str(info.get("sector_name") or "") if info else ""
+            except Exception:
+                sector_name = ""
         # 存量记录若只存了行业名（如「旅游」）没存代码，反查 881xxx 再匹配状态机，
         # 这样已录入的标的也能正确关联到板块状态，而不是显示「数据不足」。
         if not sector_code and sector_name:
@@ -200,6 +208,7 @@ def _build_position_analysis(positions: pd.DataFrame, quotes: pd.DataFrame, stat
             priority, action, reason = "尽快决策", "核验止损条件", f"实时价已触及/低于预设止损价 {float(stop_loss):.2f}，请结合个股逻辑和成交情况核验。"
         rows.append({
             **row,
+            "sector_name": sector_name,
             "sector_code": sector_code or row.get("sector_code") or "",
             "sector_state": state or "—",
             "state_date": state_info.get("date") if state_info else "",

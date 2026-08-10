@@ -54,6 +54,7 @@ SUITES = [
     ("parquet 云端镜像", "tests/selfcheck_parquet_mirror.py"),
     ("九宫格状态历史", "tests/selfcheck_state_history.py"),
     ("持仓九宫格与状态轨迹", "tests/selfcheck_portfolio_grid.py"),
+    ("实时批量+行业回退", "tests/selfcheck_eastmoney_batch.py"),
 ]
 
 

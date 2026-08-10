@@ -308,8 +308,17 @@ class EastMoneyLiveSource(BaseDataSource):
                 req = urllib.request.Request(url, headers=_HEADERS)
                 raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
                 d = json.loads(raw)
-                if d.get("data"):
-                    return [d["data"]]
+                data = d.get("data")
+                # push2 的 stock/get：
+                #  - 单 secid：data 为 dict（一只票的全部字段）
+                #  - 多 secid：data 为 list，每项一只票；旧版本偶尔只返回首项作 dict
+                # 必须两种都兼容，否则多 secid 时会把 list 整体包成 [list]，下游
+                # `item.get("f57")` 会抛 AttributeError，整批 fallback。
+                if not data:
+                    return []
+                if isinstance(data, list):
+                    return data
+                return [data]
             except Exception as e:
                 last_err = e
                 logger.debug("东财实时快照失败(第 %d 次): %s", attempt, e)
