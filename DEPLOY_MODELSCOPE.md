@@ -134,6 +134,22 @@ git push modelscope main
 - 持仓全空：通常是 `DATABASE_URL` 没填 / 填错，回退到本地 SQLite（免费层磁盘非持久，
   重启就丢）。
 
+### ⚠️ 致命坑：项目文件名不能撞 Python 标准库（已踩过）
+- **现象**：部署日志在 `install_requirements` 阶段崩，报错
+  `AttributeError: partially initialized module 'calendar' has no attribute '...'`
+  （most likely due to a circular import），最终 `change status to FAILED`。
+- **根因**：ModelScope 把项目根挂到 `sys.path` 后，`pip install` 内部
+  `import email.utils -> import calendar` 解析到了项目里**与标准库同名的文件**
+  （本仓库曾有的 `data/calendar.py`），它 top-level `import pandas` 触发循环导入，
+  把 pip 自己搞崩。
+- **修复**：已把 `data/calendar.py` 改名为 `data/market_calendar.py`，并加回归测试
+  `tests/selfcheck_no_stdlib_shadow.py`（全仓库扫文件名撞标准库 + 验证 `import calendar`
+  落到标准库）。**任何 `.py` 文件都不要叫 `calendar/time/email/random/json/re/math/
+  os/sys/...` 等标准库名。**
+- **代码改完必须重传**：ModelScope 每次部署是 `git clone` 空间仓库的全新克隆，旧仓库里
+  若残留坏文件（如根目录 `calendar.py`），重新拖文件**不会自动删它**。重传后用「空间文件」
+  页面检查并**手动删除残留的 `calendar.py`**（最稳是清空全部文件再重新拖入）。
+
 ---
 
 ## 5. 已知差异（vs Streamlit Cloud / HF Spaces）
