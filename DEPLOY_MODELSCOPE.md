@@ -30,13 +30,29 @@
 3. 填写：
    - **名称**：`stock-rotation`（最终链接形如
      `https://modelscope.cn/studios/<你的用户名>/stock-rotation`）
-   - **SDK**：选 **Streamlit** ← 关键
    - **硬件 / 算力**：CPU（免费层够用）
    - **可见性**：公开 / 私有随你（公开才能直接打开链接）
-4. 创建后会进到一个空仓库（带一个 git 地址和 `app.py` 骨架，我们等下用自己的替换）。
+4. 创建后会进入「**空间文件 / 部署设置 / 确认并部署**」三步页。**SDK 不在创建那一步选**，
+   详见下面 1.5。
 
 > 如果创建时平台没有自动识别入口，在「设置 / 高级」里把**启动文件**手动设为 `app.py`
 > 即可（README 的 frontmatter 通常会让平台自动认到）。
+
+### 1.5 SDK 在哪里选？——在「部署设置」tab 里
+
+创建创空间时**没有 SDK 这一栏**（很多人会在这里找不到）。SDK / 启动框架是在第二个
+tab「**部署设置**」里设的：
+
+- **自动识别（推荐，先试这个）**：把仓库文件（含我写的 `README.md`，frontmatter 里有
+  `sdk: streamlit` + `app_file: app.py`）上传/推上去之后，平台会读取 frontmatter
+  自动选成 Streamlit，并把入口认到 `app.py`。
+- **手动指定（兜底）**：进入「**部署设置**」tab → 找「SDK / 框架 / 启动类型」之类的
+  下拉框 → 选 **Streamlit**；同时把「**启动文件**」设为 `app.py`。
+
+> 三个 tab 的作用：
+> - **空间文件**：上传 / 推送代码（`app.py`、`requirements.txt`、`README.md`、`dashboard/` 等）
+> - **部署设置**：选 SDK = Streamlit、设启动文件 = `app.py`、填环境变量 `DATABASE_URL`
+> - **确认并部署**：点「部署」按钮触发构建
 
 ---
 
