@@ -36,7 +36,7 @@ from data.sector_universe import ensure_em_industry_map
 from data.storage.sqlite_store import SQLiteStore
 from data.storage.parquet_store import ParquetStore
 from data.freshness import DataFreshness
-from data.calendar import TradeCalendar
+from data.market_calendar import TradeCalendar
 
 logger = get_logger(__name__)
 

@@ -290,7 +290,7 @@ def _gather_mirrors(mp: MirrorPair, as_of_date: str) -> Dict[str, Any]:
         # 尝试识别"新增"：与上一交易日比对（失败则全部视为当前）
         prev_new = set()
         try:
-            from data.calendar import TradeCalendar
+            from data.market_calendar import TradeCalendar
             tc = TradeCalendar()
             prev_days = tc.get_last_n_trading_days(2, before=as_of_date)
             if len(prev_days) >= 2:

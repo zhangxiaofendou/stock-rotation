@@ -63,12 +63,12 @@ def is_trading_day(today: str) -> bool:
     """
     判断是否为交易日。
 
-    优先查已入库的**真实交易日历**（含法定节假日，data/calendar.py +
+    优先查已入库的**真实交易日历**（含法定节假日，data/market_calendar.py +
     trade_calendar 表）；日历为空或过旧时回退到「周一至周五」近似，保证
     管线在任何环境下都能跑（节假日照常运行，AkShare 无新数据则下游自动跳过）。
     """
     try:
-        from data.calendar import TradeCalendar
+        from data.market_calendar import TradeCalendar
         from data.storage.sqlite_store import SQLiteStore
         if SQLiteStore().count_trade_calendar() > 0:
             return TradeCalendar().is_trading_day(today)
@@ -122,7 +122,7 @@ def latest_trading_day(today: str, now: datetime = None) -> str:
     if now is None:
         now = datetime.now()
     try:
-        from data.calendar import TradeCalendar
+        from data.market_calendar import TradeCalendar
         from data.storage.sqlite_store import SQLiteStore
         if SQLiteStore().count_trade_calendar() > 0:
             cal = TradeCalendar()
@@ -160,7 +160,7 @@ def ensure_trade_calendar():
         logger.info("交易日历已存在（%s 条），跳过初始化。", sqlite.count_trade_calendar())
         return True
     try:
-        from data.calendar import TradeCalendar
+        from data.market_calendar import TradeCalendar
         ok = TradeCalendar(get_data_source(), sqlite).fetch_and_store()
         if ok:
             logger.info("交易日历通过 AkShare 初始化完成。")

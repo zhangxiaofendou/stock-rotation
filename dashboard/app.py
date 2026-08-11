@@ -250,7 +250,7 @@ def get_run_observability() -> Dict[str, Any]:
     }
     try:
         from data.storage.sqlite_store import SQLiteStore
-        from data.calendar import TradeCalendar
+        from data.market_calendar import TradeCalendar
         from datetime import datetime, timedelta
         sqlite = SQLiteStore()
         runs = sqlite.get_last_pipeline_runs(1)

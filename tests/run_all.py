@@ -57,6 +57,7 @@ SUITES = [
     ("持仓九宫格与状态轨迹", "tests/selfcheck_portfolio_grid.py"),
     ("实时批量+行业回退", "tests/selfcheck_eastmoney_batch.py"),
     ("部署版本角标+名称归一化兜底", "tests/selfcheck_version_and_normalized_match.py"),
+    ("禁止撞标准库文件名", "tests/selfcheck_no_stdlib_shadow.py"),
 ]
 
 
