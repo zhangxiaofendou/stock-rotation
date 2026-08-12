@@ -548,9 +548,12 @@ def main():
     # Reboot/重部署后临时磁盘清空：先从云库镜像秒级拉回最新基数据，
     # 再交给原自动刷新判缺补漏（通常只需补当天缺口，甚至直接跳过）。
     # 防御式：失败仅记录，绝不阻断页面渲染。
+    # 墙钟超时双保险：每个文件下载走 parquet_mirror 表的 SELECT(data) 查询，
+    # 即便个别查询被 Supabase pooler 卡住（statement_timeout 已兜底 20s），
+    # 整个恢复流程最多 30s 即放弃并继续渲染（本地缺的文件交给后台自动刷新补齐）。
     try:
         from data.storage.parquet_mirror import restore_parquet_from_mirror
-        restore_parquet_from_mirror()
+        _with_timeout(restore_parquet_from_mirror, seconds=30, default=None)
     except Exception:
         logger.warning("启动恢复 parquet 镜像失败（走原自动刷新逻辑）", exc_info=True)
 

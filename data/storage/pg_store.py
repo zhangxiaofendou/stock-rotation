@@ -207,7 +207,7 @@ def connect():
     for attempt in range(2):
         try:
             # psycopg3 / psycopg2 都支持 connect_timeout（秒）
-            return _connect(url, connect_timeout=5)
+            conn = _connect(url, connect_timeout=5)
         except Exception as e:  # noqa: BLE001
             last_err = e
             msg = f"{type(e).__name__}: {e}".lower()
@@ -217,6 +217,17 @@ def connect():
                     time.sleep(0.5)
                 continue
             raise PGUnavailable(f"连接失败：{type(e).__name__}: {e}") from e
+        # 关键：给连接级查询设硬超时，杜绝「建连成功但查询挂死」导致的无限转圈。
+        # 场景：Supabase pooler / pgbouncer 在抖动时建连能成功，但随后的 SELECT 会卡
+        # 住数分钟；connect_timeout 只覆盖建连阶段、(socket.setdefaulttimeout 对 psycopg
+        # 不生效——它用自有 socket 超时)，都管不到查询阶段。这里用 statement_timeout
+        # 兜底：任何一条 SQL 超过 20s 直接报错，由上层 try/except 降级而非无限阻塞前端。
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = 20000")
+        except Exception:
+            pass
+        return conn
     raise PGUnavailable(f"连接失败（重试 2 次均超时/网络错误）：{last_err}")
 
 
