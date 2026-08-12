@@ -5,8 +5,6 @@
 """
 
 import streamlit as st
-import plotly.graph_objects as go
-import plotly.express as px
 import pandas as pd
 import numpy as np
 import sys
@@ -133,6 +131,8 @@ def load_market_data():
 
 def render():
     """渲染市场温度计页面"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,只在打开本页时加载
+    import plotly.express as px        # 同上
     st.title("市场温度计")
     st.markdown("监控整体市场环境、板块状态分布和风格强弱")
 
@@ -151,6 +151,7 @@ def render():
 @st.cache_data(ttl=3600)
 def _build_fund_flow_figures():
     """构建资金流向地图图表（缓存，避免每次 tab 切换重算）。"""
+    import plotly.graph_objects as go  # 懒加载:仅在被 _render_fund_flow_map 调用时加载
     sqlite = SQLiteStore()
     latest = sqlite.get_latest_fund_flow_date()
     if latest is None:
@@ -239,6 +240,7 @@ def _render_fund_flow_map():
 
 def _render_market_overview():
     """渲染市场概览（原市场温度计内容）"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     with st.spinner("加载市场数据..."):
         market_status, state_df, state_dist, up_count, down_count, flat_count, group_stats = load_market_data()
 

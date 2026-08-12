@@ -6,7 +6,6 @@ import time
 
 import numpy as np
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
 
 from data.storage.parquet_store import ParquetStore
@@ -548,6 +547,7 @@ def _hex_rgba(hex_color: str, alpha: float) -> str:
 
 def _render_portfolio_grid(analysis: pd.DataFrame):
     """把持仓标的按其所属行业的九宫格状态，画在 3×3 网格上。"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     st.subheader("持仓行业九宫格分布")
     render_src_badge("derived", base=["user", "sector_state"])
     if analysis is None or analysis.empty:
@@ -753,6 +753,7 @@ def _render_state_transitions(analysis: pd.DataFrame, n_changes: int = 3):
 
 def _render_transition_timeline(runs_map: dict):
     """状态变化甘特时间线：每行一个行业，色块=一个状态段。"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     fig = go.Figure()
     y_labels, seen_states = [], set()
     for code, (info, runs) in runs_map.items():
@@ -905,6 +906,7 @@ def _frag_holdings(service: PortfolioHoldings):
 
 def render():
     """持仓管理主入口。"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,只在打开本页时加载
     st.title("💼 持仓管理")
     render_version_indicator()
     st.caption("管理你真实持有的标的与实际操作；通用行业信号仍以板块轮动监控中的状态机展示为准。")

@@ -5,7 +5,6 @@
 """
 
 import streamlit as st
-import plotly.graph_objects as go
 import pandas as pd
 import sys
 import os
@@ -23,6 +22,9 @@ from dashboard.components.data_source_badge import render_src_badge
 
 @st.cache_resource
 def get_stores():
+    import plotly.graph_objects as go  # 懒加载
+    import plotly.express as px        # 懒加载
+
     return ParquetStore(), SQLiteStore()
 
 
@@ -45,6 +47,7 @@ def load_mirror_data():
 @st.cache_data(ttl=3600)
 def _build_sankey_figure(mirror_pairs: list):
     """构建镜像对资金迁移 Sankey 图（缓存，避免每次 tab 切换重算）。"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     if not mirror_pairs:
         return {"empty": True}
 
@@ -189,6 +192,7 @@ def _hex_to_rgba(hex_color: str, alpha: float) -> str:
 @st.cache_data(ttl=3600)
 def _build_group_capital_path_figure(state_df: pd.DataFrame):
     """构建板块组资金迁移路径 Sankey 图（缓存，避免每次 tab 切换重算）。"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     TOP_N = 6
 
     def _ind_label(i: dict) -> str:

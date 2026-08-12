@@ -6,7 +6,6 @@
 
 import pandas as pd
 import streamlit as st
-import plotly.graph_objects as go
 from datetime import date
 
 from config.sector_map import SW_LEVEL2_MAP, get_sector_name
@@ -161,6 +160,7 @@ def _render_metrics(m: dict, strategy_name: str):
 
 
 def _render_equity_chart(result):
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     eq = result.equity_curve.reset_index()
     fig = go.Figure()
     fig.add_trace(go.Scatter(
@@ -182,6 +182,7 @@ def _render_equity_chart(result):
 
 
 def _render_annual(m: dict):
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     annual = m.get("annual_returns") or {}
     if not annual:
         return
@@ -197,6 +198,7 @@ def _render_annual(m: dict):
 
 
 def _render_contributions(result):
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     st.subheader("板块收益贡献（Top/Bottom）")
     render_src_badge("derived", base=["ths_kline", "em_flow"])
     contrib = result.contributions.copy()
@@ -240,6 +242,7 @@ def _render_save_experiment(strategy_name: str, params: dict, m: dict, start: st
 # 渲染：历史回放
 # ============================================================
 def _render_replay():
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     st.subheader("历史信号回放")
     render_src_badge("derived", base=["history"])
     st.caption("选择任一历史日期，只读展示当天市场全貌（九宫格状态分布 / 镜像对 / 动作建议）。")
@@ -327,6 +330,7 @@ def _render_experiments():
 # 主入口
 # ============================================================
 def render():
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,只在打开本页时加载
     st.title("🔬 策略研究")
     st.caption("事件驱动回测 + 信号回放 + 实验记录。与实时看板、真实持仓完全隔离，只读冻结历史行情。")
     from dashboard.components.nav_state import persistent_tabs

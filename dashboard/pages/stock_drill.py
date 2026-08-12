@@ -6,7 +6,6 @@ PRD 5.2 实现：板块成分股列表（按相对强弱排序）、龙头识别
 """
 
 import streamlit as st
-import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
@@ -44,6 +43,9 @@ logger = get_logger(__name__)
 # ============================================================
 @st.cache_resource
 def get_source():
+    import plotly.graph_objects as go  # 懒加载
+    import plotly.express as px        # 懒加载
+
     return get_data_source()
 
 
@@ -760,6 +762,7 @@ def _render_leaders(merged_df: pd.DataFrame, sector_name: str):
 
 def _render_mini_kline(stock_code: str, stock_name: str):
     """渲染个股迷你K线图"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     df = load_stock_hist_cached(stock_code, days=30)
     if df is None or df.empty:
         st.caption(f"{stock_name}: 暂无行情数据")
@@ -1130,6 +1133,7 @@ def _render_fund_flow_detail(merged_df: pd.DataFrame):
 
 def _render_stock_detail_popup(code: str, name: str):
     """个股详情弹窗：日K + 资金流 + 基本面"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     with st.expander(f"📈 个股详情: {name} ({code})", expanded=False):
         tab1, tab2, tab3 = st.tabs(["走势图", "资金流", "基本面"])
 

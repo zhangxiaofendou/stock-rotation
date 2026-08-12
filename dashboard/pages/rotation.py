@@ -5,8 +5,6 @@
 """
 
 import streamlit as st
-import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 import sys
@@ -494,6 +492,7 @@ def _render_state_badge(trend: str, badge, state: str):
 
 def _render_kline_chart(kline_df: pd.DataFrame, sector_name: str):
     """250日K线图（红涨绿跌 + MA5/20/60 + 成交量）"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     if kline_df is None or kline_df.empty:
         st.warning("暂无K线数据")
         return
@@ -658,6 +657,7 @@ def load_sector_rs(sector_code: str):
 
 def _render_rs_chart(rs_df: pd.DataFrame):
     """渲染RS走势图"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     if rs_df is None or rs_df.empty:
         st.warning("暂无RS数据")
         return
@@ -706,6 +706,7 @@ def _render_rs_chart(rs_df: pd.DataFrame):
 
 def _render_rs_momentum_chart(rs_df: pd.DataFrame):
     """渲染RS动量图"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     if rs_df is None or rs_df.empty or "rs_momentum_percentile" not in rs_df.columns:
         st.warning("暂无RS动量数据")
         return
@@ -740,6 +741,7 @@ def _render_rs_momentum_chart(rs_df: pd.DataFrame):
 
 def _render_state_history(state_series: pd.DataFrame):
     """渲染状态历史（最近20天）"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     if state_series is None or state_series.empty:
         st.warning("暂无状态历史数据")
         return
@@ -793,6 +795,9 @@ def _get_suggestion(state: str, prev_state: str) -> str:
 
 def render():
     """渲染板块轮动监控页面"""
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
+    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,只在打开本页时加载
+    from plotly.subplots import make_subplots  # 同上
     st.title("板块轮动监控")
     st.markdown("九宫格热力图、板块详情、个股下钻、趋势验证")
 
