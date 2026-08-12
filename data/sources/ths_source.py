@@ -346,11 +346,12 @@ class THSDataSource(BaseDataSource):
 
         返回 DataFrame 列：名称、代码、主力净流入-净额（代理）、涨跌幅
         """
-        # 复用实时行业清单接口。注意：该接口有反爬，失败时返回空；
-        # 不再用静态兜底（全部涨幅=0 会导致排名失真），由上层从 parquet index_hist 回退。
+        # 复用实时行业清单接口（带静态兜底）
         rows = self._fetch_ths_industry_rows()
         if not rows:
-            logger.warning("同花顺行业实时接口为空，资金流排名交给上层从 index_hist 回退")
+            logger.warning("同花顺行业实时接口为空，启用静态兜底生成资金流排名")
+            rows = [{"code": code, "name": name, "pct": 0.0} for code, name in _THS_FALLBACK_MAP.items()]
+        if not rows:
             return None
 
         df = pd.DataFrame(rows)

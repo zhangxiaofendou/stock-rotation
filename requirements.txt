@@ -13,6 +13,10 @@ streamlit==1.59.2
 plotly>=5.18.0
 baostock>=0.8.8
 scikit-learn>=1.3.0
-# 云端持久化：账号与持仓写入 Postgres（Supabase/Neon），避免 Cloud 重部署清空数据。
-# 未配置 DATABASE_URL 时代码自动回退本地 SQLite，此依赖不生效也不报错。
+
+# Cloud Postgres 多用户持仓持久化（账号/持仓写 Supabase/Neon）
+supabase>=2.0.0
+psycopg2-binary>=2.9.9
+
+# pg_store 优先 psycopg3(wheel 友好),fallback psycopg2
 psycopg[binary]>=3.1.18

@@ -89,72 +89,6 @@ class MoneyFlowIndicator:
     # ============================================================
     # 核心指标计算
     # ============================================================
-    def _build_fund_flow_from_index_hist(self, indicator: str = "今日") -> Optional[pd.DataFrame]:
-        """当实时资金流接口不可用时，用 parquet index_hist 涨跌幅构造资金流排名。
-
-        每日管线先更新 index_hist，因此回退数据与最新交易日一致；
-        用涨跌幅代理主力净流入方向，至少保证资金流向地图的红绿条形有意义。
-        对 "5日"/"10日" 指标，取最近 N 个交易日累计涨跌幅作为代理。
-        """
-        try:
-            sectors = self.sqlite_store.get_sectors(level=2)
-            if sectors is None or sectors.empty:
-                return None
-            # 同花顺 K 线落盘列名为中文，先统一映射到英文列
-            col_map = {
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume",
-                "成交额": "amount",
-                "振幅": "amplitude",
-                "涨跌幅": "pct_change",
-                "涨跌额": "change",
-                "换手率": "turnover",
-            }
-            # 解析指标对应的交易日窗口
-            window = 1
-            if indicator.endswith("日"):
-                try:
-                    window = max(1, int(indicator.replace("日", "").strip()))
-                except ValueError:
-                    window = 1
-            rows = []
-            for _, row in sectors.iterrows():
-                code = row["code"]
-                name = row["name"]
-                df = self.parquet_store.load_index_hist(code)
-                if df is None or df.empty:
-                    continue
-                df = df.copy()
-                df = df.rename(columns={k: v for k, v in col_map.items() if k in df.columns})
-                if "date" not in df.columns or "pct_change" not in df.columns:
-                    continue
-                df["date"] = pd.to_datetime(df["date"])
-                df = df.sort_values("date")
-                if len(df) < window:
-                    continue
-                # 取最近 window 个交易日累计涨跌幅（复利近似）
-                recent = df.tail(window)
-                pct = (1 + recent["pct_change"] / 100).prod() - 1
-                pct = pct * 100
-                if pd.isna(pct):
-                    continue
-                rows.append({"code": code, "name": name, "pct": float(pct)})
-            if not rows:
-                return None
-            df = pd.DataFrame(rows)
-            df = df.rename(columns={"code": "代码", "name": "名称", "pct": "涨跌幅"})
-            df["主力净流入-净额"] = df["涨跌幅"].astype(float)
-            df["净流入-净额"] = df["涨跌幅"].astype(float)
-            df["主力净流入"] = df["涨跌幅"].astype(float)
-            return df[["名称", "代码", "主力净流入-净额", "净流入-净额", "主力净流入", "涨跌幅"]]
-        except Exception as e:
-            logger.warning(f"从 index_hist 构造资金流排名失败: {e}")
-            return None
-
     def calc_sector_fund_flow_rank(self, indicator: str = "今日") -> Optional[pd.DataFrame]:
         """
         获取行业资金流排名
@@ -176,26 +110,21 @@ class MoneyFlowIndicator:
         # 从数据源获取
         if self.data_source is None:
             logger.warning("未配置数据源，无法获取资金流数据")
-            df = None
-        else:
-            try:
-                df = self.data_source.get_sector_fund_flow_rank(indicator=indicator)
-            except Exception as e:
-                logger.error(f"获取资金流排名失败 {indicator}: {e}")
-                df = None
+            return None
 
-        # 数据源不可用或为空时，从已更新的 parquet index_hist 回退（主要用于同花顺实时接口被反爬的场景）
-        if df is None or df.empty:
-            logger.warning(f"资金流排名 {indicator} 数据源为空，尝试从 parquet index_hist 构造")
-            df = self._build_fund_flow_from_index_hist(indicator=indicator)
-
-        if df is not None and not df.empty:
-            self._save_fund_flow_cache(df, indicator)
-            logger.info(f"获取资金流排名 {indicator} 成功, 共 {len(df)} 条")
-            return df
-
-        logger.warning(f"资金流排名 {indicator} 数据为空")
-        return None
+        try:
+            df = self.data_source.get_sector_fund_flow_rank(indicator=indicator)
+            if df is not None and not df.empty:
+                # 缓存数据
+                self._save_fund_flow_cache(df, indicator)
+                logger.info(f"获取资金流排名 {indicator} 成功, 共 {len(df)} 条")
+                return df
+            else:
+                logger.warning(f"资金流排名 {indicator} 数据为空")
+                return None
+        except Exception as e:
+            logger.error(f"获取资金流排名失败 {indicator}: {e}")
+            return None
 
     def calc_fund_flow_trend(self, sector_code: str, days: int = 5) -> Optional[Dict]:
         """
@@ -358,17 +287,10 @@ class MoneyFlowIndicator:
             if flow_col and current_rank is not None:
                 # 判断是净流入还是净流出
                 total_industries = len(current_df)
-                # 趋势改善/恶化时按原逻辑；趋势稳定时直接按排名分位着色，
-                # 保证资金流向地图的红绿条形始终有意义。
-                if trend == "改善" and current_rank <= total_industries * 0.4:
+                if current_rank <= total_industries * 0.4 and trend == "改善":
                     return "正向"
-                elif trend == "恶化" and current_rank > total_industries * 0.6:
+                elif current_rank > total_industries * 0.6 and trend == "恶化":
                     return "反向"
-                elif trend == "稳定":
-                    if current_rank <= total_industries * 0.2:
-                        return "正向"
-                    elif current_rank > total_industries * 0.8:
-                        return "反向"
 
         return "中性"
 

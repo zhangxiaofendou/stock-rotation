@@ -338,8 +338,8 @@ class StateMachine:
             logger.warning("未配置ParquetStore，无法读取RS数据")
             return None
 
-        # RS指标存储在 data/storage/parquet/indicators/rs/{code}.parquet
-        # 例如: 881121 -> 881121.parquet
+        # RS指标存储在 data/storage/parquet/indicators/rs/{code}_SI.parquet
+        # 例如: 801012.SI -> 801012_SI.parquet
         import os
         rs_dir = os.path.join(str(PARQUET_DIR), "indicators", "rs")
         safe_code = sector_code.replace(".", "_")
@@ -374,7 +374,7 @@ class StateMachine:
             logger.warning("未配置ParquetStore，无法读取趋势数据")
             return None
 
-        # 例如: 881121 -> 881121.parquet
+        # 例如: 801012.SI -> 801012_SI.parquet
         import os
         trend_dir = os.path.join(str(PARQUET_DIR), "indicators", "trend")
         safe_code = sector_code.replace(".", "_")
@@ -520,6 +520,7 @@ class StateMachine:
         for f in os.listdir(rs_dir):
             if f.endswith(".parquet"):
                 # 文件名保存时把 code 中的 '.' 替换为 '_'，因此还原即可。
+                # 申万 801010.SI -> 801010_SI.parquet -> 801010.SI
                 # 同花顺 881121   -> 881121.parquet   -> 881121
                 code = f.replace(".parquet", "").replace("_", ".")
                 sector_codes.append(code)
@@ -581,15 +582,7 @@ class StateMachine:
                 logger.error(f"计算板块 {code} 状态异常: {e}")
 
         if not results:
-            logger.warning("全量计算未产出任何板块状态，尝试回退读取快照缓存")
-            try:
-                if os.path.exists(snapshot_path):
-                    cached = pd.read_parquet(snapshot_path)
-                    if not cached.empty:
-                        logger.info(f"已从快照缓存回退, {len(cached)} 个板块")
-                        return cached
-            except Exception as e:
-                logger.warning(f"回退读取快照失败: {e}")
+            logger.warning("未计算出任何板块状态")
             return None
 
         result_df = pd.DataFrame(results)

@@ -101,22 +101,13 @@ def _secid_of_index(code: str) -> Optional[str]:
 
 
 def _secid_of_stock(code: str) -> Optional[str]:
-    """把个股/ETF 代码转为东财 secid（1.600519 / 0.159766）。
-
-    覆盖：
-      - 沪市股票：6/9 开头 -> 1.{code}
-      - 深市股票：0/3 开头 -> 0.{code}
-      - 沪市 ETF：5 开头  -> 1.{code}（如 510300）
-      - 深市 ETF：1 开头  -> 0.{code}（如 159766）
-      - 北交所股票：4/8 开头 -> 0.{code}
-    """
+    """把个股代码（600519）转为东财 secid（1.600519）。空串/非字符串返回 None。"""
     code = str(code).strip()
-    if not code or len(code) != 6 or not code.isdigit():
+    if not code:
         return None
-    head = code[0]
-    if head in ("6", "9", "5"):
+    if code[0] in ("6", "9"):
         return f"1.{code}"
-    if head in ("0", "3", "1", "4", "8"):
+    if code[0] in ("0", "3"):
         return f"0.{code}"
     return None
 
@@ -293,37 +284,19 @@ class EastMoneyLiveSource(BaseDataSource):
             return None
 
     def _quote(self, secids, fields="f43,f57,f58,f169,f170,f86"):
-        """东方财富 push2 实时快照。返回 list[dict]，失败返回 []。
-
-        含重试：东财实时接口对基金/ETF 偶尔会"Remote end closed"或限流，
-        1-2 次重试通常可恢复；重试用尽才返回 []。
-        """
+        """东方财富 push2 实时快照。返回 list[dict]，失败返回 []。"""
         if isinstance(secids, str):
             secids = [secids]
-        secids_str = ",".join(secids)
-        url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secids_str}&fields={fields}"
-        last_err = None
-        for attempt in range(1, max(2, self._retries) + 1):
-            try:
-                req = urllib.request.Request(url, headers=_HEADERS)
-                raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
-                d = json.loads(raw)
-                data = d.get("data")
-                # push2 的 stock/get：
-                #  - 单 secid：data 为 dict（一只票的全部字段）
-                #  - 多 secid：data 为 list，每项一只票；旧版本偶尔只返回首项作 dict
-                # 必须两种都兼容，否则多 secid 时会把 list 整体包成 [list]，下游
-                # `item.get("f57")` 会抛 AttributeError，整批 fallback。
-                if not data:
-                    return []
-                if isinstance(data, list):
-                    return data
-                return [data]
-            except Exception as e:
-                last_err = e
-                logger.debug("东财实时快照失败(第 %d 次): %s", attempt, e)
-                time.sleep(0.4 * attempt)
-        logger.warning("东财实时快照失败(secids=%s): %s", secids_str, last_err)
+        secids = ",".join(secids)
+        url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secids}&fields={fields}"
+        try:
+            req = urllib.request.Request(url, headers=_HEADERS)
+            raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+            d = json.loads(raw)
+            if d.get("data"):
+                return [d["data"]]
+        except Exception as e:
+            logger.warning("东财实时快照失败: %s", e)
         return []
 
     def get_realtime_sector_quotes(self, secids: Optional[list] = None) -> list:
