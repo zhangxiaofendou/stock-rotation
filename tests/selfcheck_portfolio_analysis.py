@@ -4,7 +4,7 @@ import sys
 import pandas as pd
 
 sys.path.insert(0, ".")
-from dashboard.pages.portfolio import _build_position_analysis  # noqa: E402
+from dashboard.views.portfolio import _build_position_analysis  # noqa: E402
 
 positions = pd.DataFrame([
     {"security_code": "600001", "security_name": "A", "sector_code": "S1", "sector_name": "板块一", "quantity": 100, "avg_cost": 10, "cost_amount": 1000, "stop_loss": 8},

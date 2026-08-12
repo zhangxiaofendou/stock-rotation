@@ -28,7 +28,7 @@ from dashboard.components.drill_pickers import (
     render_transition_picker,
     render_sector_picker,
 )
-from dashboard.pages.stock_drill import render as render_stock_drill
+from dashboard.views.stock_drill import render as render_stock_drill
 from dashboard.components.nav_state import persistent_tabs
 from signal_tracker.performance import get_sector_signal_summary
 from ai.consensus import compute_sector_consensus

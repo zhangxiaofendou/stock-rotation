@@ -17,7 +17,7 @@ sys.path.insert(0, ".")
 
 import pandas as pd
 
-import dashboard.pages.portfolio as P
+import dashboard.views.portfolio as P
 
 
 def _fake_row(code):

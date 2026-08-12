@@ -137,7 +137,7 @@ def render():
     st.markdown("监控整体市场环境、板块状态分布和风格强弱")
 
     from dashboard.components.nav_state import persistent_tabs
-    from dashboard.pages.mirror_pair import render as render_mirror
+    from dashboard.views.mirror_pair import render as render_mirror
 
     MARKET_TEMP_TABS = ["市场概览", "镜像对监控"]
     active = persistent_tabs("market_temp_tab", MARKET_TEMP_TABS)
@@ -451,7 +451,7 @@ def _render_market_overview():
     st.caption("按各板块组的净资金流推导组间迁移：红=净流出板块组(弱势)，绿=净流入板块组(强势)")
 
     try:
-        from dashboard.pages.mirror_pair import render_group_capital_path
+        from dashboard.views.mirror_pair import render_group_capital_path
         render_group_capital_path(state_df)
     except Exception as e:
         st.warning(f"板块组资金迁移路径加载失败：{e}")

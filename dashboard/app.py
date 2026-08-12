@@ -674,22 +674,22 @@ def main():
     # 页面路由
     # ================================================================
     if page == "市场温度计":
-        from dashboard.pages.market_temp import render
+        from dashboard.views.market_temp import render
         render()
     elif page == "板块轮动监控":
-        from dashboard.pages.rotation import render
+        from dashboard.views.rotation import render
         render()
     elif page == "持仓管理":
-        from dashboard.pages.portfolio import render
+        from dashboard.views.portfolio import render
         render()
     elif page == "信号绩效":
-        from dashboard.pages.signal_perf import render
+        from dashboard.views.signal_perf import render
         render()
     elif page == "策略研究":
-        from dashboard.pages.strategy_research import render
+        from dashboard.views.strategy_research import render
         render()
     elif page == "盘后报告":
-        from dashboard.pages.reports import render
+        from dashboard.views.reports import render
         render()
 
     # 盘中实时自动刷新已下放到 _render_realtime_ticker_fragment（fragment 局部重跑），

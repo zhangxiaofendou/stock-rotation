@@ -66,9 +66,3 @@ _贵金属评分详解.html
 _行业状态评审报告.html
 industry_state_review.html
 _*.html
-
-# === 部署时排除 parquet 大文件(运行时从云库 Supabase 镜像恢复) ===
-data/storage/parquet/**/*.parquet
-data/storage/parquet/**/*.parquet.tmp
-data/storage/cache/**/*.parquet
-data/storage/cache/**/*.parquet.tmp

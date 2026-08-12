@@ -103,9 +103,9 @@ sys.modules["streamlit"] = fake_st
 
 # 重新加载 portfolio（确保 fake_st 生效）
 import importlib
-if "dashboard.pages.portfolio" in sys.modules:
-    importlib.reload(sys.modules["dashboard.pages.portfolio"])
-portfolio_page = importlib.import_module("dashboard.pages.portfolio")
+if "dashboard.views.portfolio" in sys.modules:
+    importlib.reload(sys.modules["dashboard.views.portfolio"])
+portfolio_page = importlib.import_module("dashboard.views.portfolio")
 
 import pandas as pd
 

@@ -36,7 +36,7 @@ sys.modules["streamlit"] = _fake_st
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import dashboard.pages.portfolio as P  # noqa: E402
+import dashboard.views.portfolio as P  # noqa: E402
 from model.state_history import STATE_CELL  # noqa: E402
 
 

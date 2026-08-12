@@ -145,7 +145,7 @@ check("已登录被放行", _guard_allows_logged_in)
 
 print("\n[5] 持仓录入表单（最少录入 + 自动补全）")
 
-import dashboard.pages.portfolio as portfolio_page  # noqa: E402
+import dashboard.views.portfolio as portfolio_page  # noqa: E402
 
 
 def _make_service():

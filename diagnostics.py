@@ -536,8 +536,8 @@ _APP_MODULES = [
     "auth",
     "portfolio.holdings",
     "report.generator",
-    "dashboard.pages.portfolio",
-    "dashboard.pages.reports",
+    "dashboard.views.portfolio",
+    "dashboard.views.reports",
     "dashboard.app",
 ]
 

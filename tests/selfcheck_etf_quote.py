@@ -16,7 +16,7 @@ from data.sources.eastmoney_source import (  # noqa: E402
     EastMoneyLiveSource,
     _secid_of_stock,
 )
-from dashboard.pages.portfolio import load_live_quotes_for_portfolio  # noqa: E402
+from dashboard.views.portfolio import load_live_quotes_for_portfolio  # noqa: E402
 
 results = []
 

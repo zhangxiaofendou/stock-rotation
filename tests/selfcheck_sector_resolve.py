@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 from portfolio.stock_lookup import resolve_sector
-import dashboard.pages.portfolio as P
+import dashboard.views.portfolio as P
 
 
 class TestResolveSector(unittest.TestCase):

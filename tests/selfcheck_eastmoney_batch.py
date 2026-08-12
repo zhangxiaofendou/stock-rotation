@@ -94,7 +94,7 @@ def _test_fetch_quotes_batch_propagates_sector():
     fake_em_module._secid_of_stock = eastmoney_source._secid_of_stock
     sys.modules["data.sources.eastmoney_source"] = fake_em_module
     try:
-        from dashboard.pages import portfolio as portfolio_page  # noqa: F401
+        from dashboard.views import portfolio as portfolio_page  # noqa: F401
         with mock.patch.object(eastmoney_source.urllib.request, "urlopen", return_value=_http_response(body)):
             rows = portfolio_page._fetch_quotes_batch(("159766", "603887"))
     finally:
@@ -114,7 +114,7 @@ def _test_build_position_analysis_per_code_fallback():
     而非永远显示「数据不足」。
     """
     # 屏蔽真实 streamlit 渲染
-    from dashboard.pages import portfolio as portfolio_page  # noqa: F401
+    from dashboard.views import portfolio as portfolio_page  # noqa: F401
     positions = pd.DataFrame([{
         "security_code": "603887",
         "security_name": "城地香江",
