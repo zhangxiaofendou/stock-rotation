@@ -12,3 +12,8 @@
 - 数据：22 个 parquet 在 `data/storage/parquet/`，已 `.gitignore` 不推；运行时从 Supabase parquet_mirror 恢复
 - 持久化：账号/持仓写 Cloud Postgres（DATABASE_URL 环境变量），SQLite 作为本地镜像
 - 多用户：登录界面默认账号已演示在「登录/注册」说明里，密码本地哈希
+
+<!-- 2026-08-12 21:18 — 强制新 commit 触发 ModelScope webhook 重建容器 -->
+<!-- 之前的 f5234af 已 rename dashboard/pages -> dashboard/views，git 树里 pages/ 已删 -->
+<!-- 但容器文件系统可能残留 pages/ → Streamlit auto-discovery 仍列 8 个英文 subpage -->
+<!-- 触发重新构建(完整 git clone + checkout HEAD)，残留目录会被清空 -->
