@@ -189,7 +189,13 @@ class PGUnavailable(RuntimeError):
 
 
 def connect():
-    """建立一个新连接；调用方负责关闭。"""
+    """建立一个新连接；调用方负责关闭。
+
+    关键：必须设 connect_timeout 并捕获超时异常。
+    - Supabase 直连 pooler（pgbouncer）在抖动时新连接会挂死数分钟，
+      没 timeout 会让前端按钮一直转圈，无法 fail-fast 进降级。
+    - 简单重试 1 次抗瞬时抖动；二次失败立刻抛 PGUnavailable 让上层优雅降级。
+    """
     if not _DRIVER:
         raise PGUnavailable(
             "未安装 Postgres 驱动。请在 requirements.txt 中加入 psycopg[binary] 或 psycopg2-binary。"
@@ -197,7 +203,21 @@ def connect():
     url = get_database_url()
     if not url:
         raise PGUnavailable("未配置 DATABASE_URL。")
-    return _connect(url)
+    last_err: Optional[Exception] = None
+    for attempt in range(2):
+        try:
+            # psycopg3 / psycopg2 都支持 connect_timeout（秒）
+            return _connect(url, connect_timeout=5)
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            msg = f"{type(e).__name__}: {e}".lower()
+            # 超时 / 网络层错误才重试，业务错误（认证失败等）直接放弃
+            if "timeout" in msg or "operational" in msg or "network" in msg or "refused" in msg or "unreachable" in msg:
+                if attempt == 0:
+                    time.sleep(0.5)
+                continue
+            raise PGUnavailable(f"连接失败：{type(e).__name__}: {e}") from e
+    raise PGUnavailable(f"连接失败（重试 2 次均超时/网络错误）：{last_err}")
 
 
 def ensure_schema(force: bool = False) -> None:

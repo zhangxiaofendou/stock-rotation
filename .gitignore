@@ -11,6 +11,8 @@ venv/
 
 # Cache
 data/storage/parquet/cache/
+data/storage/parquet/**/*.parquet
+data/cache/
 .pytest_cache/
 
 # Logs
