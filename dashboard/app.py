@@ -28,6 +28,20 @@ from dashboard.components.data_source_badge import render_legend, render_src_bad
 logger = get_logger(__name__)
 
 # ============================================================
+# 全局网络兜底超时（关键：防止登录后整页无限转圈）
+# ------------------------------------------------------------
+# 云端容器（ModelScope / Streamlit Cloud）访问外部数据源（同花顺 / 东方财富 /
+# AkShare 等）时，若被墙或 DNS 不通，很多库（akshare 的 requests 调用）底层的
+# socket 默认【没有超时】，会无限挂起。首页 ensure_universe() 拉行业清单、
+# 默认页渲染拉行情都会卡死，表现就是「点登录后一直转」。
+# 这里给所有 socket 操作一个 12 秒硬上限：任何没自带超时的联网调用都会在
+# 12 秒内失败并走各处的降级逻辑（回退缓存 / 返回空），绝不阻断页面渲染。
+# 注：数据库连接的 connect_timeout=5 已在 pg_store.connect() 单独设置，且查询
+# 都很轻量，12s 上限不会误伤；此设置仅作最后防线。
+import socket
+socket.setdefaulttimeout(12)
+
+# ============================================================
 # 手动刷新：后台线程 + 进度轮询（避免 Streamlit 同步阻塞导致进程被杀）
 # ============================================================
 PIPELINE_PROGRESS_PATH = LOG_DIR / "pipeline_progress.json"
@@ -544,7 +558,9 @@ def main():
     _maybe_auto_refresh_on_stale()
 
     # 启动时确保板块宇宙(同花顺行业)就绪，并刷新 SQLite 板块元数据
-    ensure_universe()
+    # 套线程池超时：即便个别数据源完全不通，最多卡 15s 即降级（回退缓存），
+    # 绝不无限转圈。全局 socket.setdefaulttimeout(12) 是主防线，这里双保险。
+    _with_timeout(ensure_universe, seconds=15, default=None)
 
     # ================================================================
     # 侧边栏
