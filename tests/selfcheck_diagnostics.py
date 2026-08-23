@@ -97,6 +97,37 @@ r = diag_url(None)
 check("给出隐患警告", r["DATABASE_URL 是否配置"][0] == D.WARN, r["DATABASE_URL 是否配置"])
 check("说明会丢数据", "清空" in r["DATABASE_URL 是否配置"][2])
 
+# ---------- 坑 7b：未配 DATABASE_URL 但持久卷生效（ModelScope 创空间真实场景）→
+# 期望降级为 PASS，因为持久卷已自动接管，云库可选。 ----------
+print("\n[坑7b] 未配 DATABASE_URL + 持久卷生效")
+import tempfile as _tf
+_tmp_persist = _tf.mkdtemp(prefix="diag_persist_")
+_old_persist = os.environ.get("PERSISTENT_STORAGE_DIR")
+os.environ["PERSISTENT_STORAGE_DIR"] = _tmp_persist
+try:
+    # 强制 reload settings，让 PERSIST_DIR_SOURCE 反映新环境变量
+    import importlib
+    import config.settings as _settings_mod
+    importlib.reload(_settings_mod)
+    importlib.reload(D)
+    r = diag_url(None)
+    check("持久卷生效时降级为 PASS",
+          r["DATABASE_URL 是否配置"][0] == D.PASS,
+          r["DATABASE_URL 是否配置"])
+    check("详情提示持久卷已生效",
+          "持久卷" in r["DATABASE_URL 是否配置"][1],
+          r["DATABASE_URL 是否配置"][1])
+    # 还原 settings 模块，避免影响后续用例
+    if _old_persist is None:
+        os.environ.pop("PERSISTENT_STORAGE_DIR", None)
+    else:
+        os.environ["PERSISTENT_STORAGE_DIR"] = _old_persist
+    importlib.reload(_settings_mod)
+    importlib.reload(D)
+finally:
+    import shutil as _sh
+    _sh.rmtree(_tmp_persist, ignore_errors=True)
+
 # ---------- 坑 8：连接串里的密码不得在报告中明文泄露 ----------
 print("\n[坑8] 报告脱敏")
 r = diag_url(f"postgresql://postgres.{REF}:SuperSecret123@{POOLER}:5432/postgres")
