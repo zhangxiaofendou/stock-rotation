@@ -19,18 +19,32 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = PROJECT_ROOT / "data"
 CACHE_DIR = DATA_DIR / "cache"
 
-# Parquet 行情数据目录
-PARQUET_DIR = DATA_DIR / "storage" / "parquet"
-
 # ============================================================
-# 持久化目录（跨部署保留：SQLite 持仓库 + 登录凭证 + 会话密钥）
+# 持久化目录（跨部署保留：SQLite 持仓库 + 登录凭证 + 会话密钥 + Parquet 行情镜像）
 # ------------------------------------------------------------
-# 默认落在项目内的 .persist（本地开发可正常留存）。
-# 在 Streamlit Cloud 上部署多用户持仓时，必须在后台「Secrets / 环境变量」
-# 中设置 PERSISTENT_STORAGE_DIR 为已开启的 Persistent Storage 挂载路径，
-# 否则数据仍写在临时磁盘、每次重部署即清空。
+# 解析优先级：
+#   ① 环境变量 PERSISTENT_STORAGE_DIR（ModelScope 创空间「环境变量」面板设置）
+#   ② /mnt/workspace 是否存在且可写（ModelScope 创空间官方持久卷，启动自动识别）
+#   ③ 项目本地 .persist（本地开发默认）
+# 这样云端零配置即可持久化；本地不受影响，用户零感知。
 # ============================================================
-PERSIST_DIR = Path(os.environ.get("PERSISTENT_STORAGE_DIR") or (PROJECT_ROOT / ".persist"))
+def _resolve_persist_dir():
+    env_dir = os.environ.get("PERSISTENT_STORAGE_DIR")
+    if env_dir:
+        return Path(env_dir), "PERSISTENT_STORAGE_DIR"
+    # ModelScope 创空间的官方持久卷：只要存在且可写就自动用它，无需配置环境变量
+    if os.path.isdir("/mnt/workspace"):
+        try:
+            probe = Path("/mnt/workspace") / ".probe_write"
+            probe.touch()
+            probe.unlink()
+            return Path("/mnt/workspace"), "/mnt/workspace"
+        except Exception:
+            pass
+    return PROJECT_ROOT / ".persist", "PROJECT_ROOT/.persist"
+
+
+PERSIST_DIR, PERSIST_DIR_SOURCE = _resolve_persist_dir()
 PERSIST_DIR.mkdir(parents=True, exist_ok=True)
 
 # SQLite 数据库路径（含板块/持仓/新鲜度等全部元数）—— 移入持久化目录
@@ -39,6 +53,9 @@ SQLITE_DB_PATH = PERSIST_DIR / "sector_rotation.db"
 # 多用户登录凭证（JSON）与会话签名密钥
 CREDENTIALS_PATH = PERSIST_DIR / "credentials.json"
 SESSION_SECRET_PATH = PERSIST_DIR / "session_secret.bin"
+
+# Parquet 行情数据目录 —— 移入持久化目录，避免重启后行情缓存全部重建
+PARQUET_DIR = PERSIST_DIR / "parquet"
 
 # 确保目录存在
 for _dir in [DATA_DIR, CACHE_DIR, PARQUET_DIR, SQLITE_DB_PATH.parent, CREDENTIALS_PATH.parent]:

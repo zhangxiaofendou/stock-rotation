@@ -202,6 +202,31 @@ def _mask(url: str) -> str:
         return "<无法解析>"
 
 
+def _persist_layer_status() -> tuple[bool, str]:
+    """判断「持久层是否真的不会因重部署/Reboot/Restart 丢失数据」。
+
+    返回 (ok, hint)：
+        ok=True  表示当前 PERSIST_DIR 已经落在持久卷上，重启不丢数据
+        ok=False 表示当前 PERSIST_DIR 仍是容器临时层
+    """
+    try:
+        from config.settings import PERSIST_DIR, PERSIST_DIR_SOURCE
+        path = str(PERSIST_DIR).replace("\\", "/").rstrip("/")
+        # ① ModelScope 创空间官方持久卷
+        if path.startswith("/mnt/workspace") or path == "/mnt/workspace":
+            return True, f"ModelScope 持久卷 {path}"
+        # ② 用户显式声明了持久目录
+        if PERSIST_DIR_SOURCE == "PERSISTENT_STORAGE_DIR":
+            return True, f"环境变量 PERSISTENT_STORAGE_DIR={PERSIST_DIR}"
+        # ③ 已接入云数据库（由其他模块保证持久化）
+        from data.storage import pg_store
+        if pg_store.is_enabled():
+            return True, "已接入云 Postgres 数据库"
+        return False, f"PERSIST_DIR={PERSIST_DIR} (源={PERSIST_DIR_SOURCE})"
+    except Exception as e:
+        return False, f"无法判定：{e}"
+
+
 def check_database_url(report: Report) -> Optional[str]:
     cat = "L4 配置"
     raw: Optional[str] = None
@@ -216,10 +241,20 @@ def check_database_url(report: Report) -> Optional[str]:
                 raw = None
         raw = str(raw).strip() if raw else None
         if not raw:
-            report.add(cat, "DATABASE_URL 是否配置", WARN, "未配置",
-                       "未配置时账号与持仓写在容器临时磁盘，Streamlit Cloud 每次重部署都会清空。"
-                       "如需持久保存，请在 Settings → Secrets 里加一行："
-                       'DATABASE_URL = "postgresql://用户名:密码@主机:5432/postgres"')
+            # 决定严重程度：若持久卷已自动接管（ModelScope /mnt/workspace 或环境变量指定），
+            # 未配 DATABASE_URL 不再是隐患，仅作为可选升级路径提醒。
+            persist_ok, persist_hint = _persist_layer_status()
+            if persist_ok:
+                report.add(cat, "DATABASE_URL 是否配置", PASS,
+                           f"未配云库，但持久卷已生效（{persist_hint}）。账号与持仓不会因重部署丢失。",
+                           "如需多设备共享持仓，再加 DATABASE_URL 指向 Supabase/Neon 等云 Postgres。")
+            else:
+                report.add(cat, "DATABASE_URL 是否配置", WARN, "未配置",
+                           "未配置时账号与持仓写在容器临时磁盘，ModelScope 创空间每次 Restart Studio 都会清空。"
+                           "① 最简：无需任何配置，部署默认会自动识别 /mnt/workspace 持久卷；"
+                           "② 进阶：在「环境变量」面板设 PERSISTENT_STORAGE_DIR 指向持久挂载目录；"
+                           "③ 高级：加 DATABASE_URL 接入云 Postgres。"
+                           'DATABASE_URL 形如: "postgresql://用户名:密码@主机:5432/postgres"')
             return None
         report.add(cat, "DATABASE_URL 是否配置", PASS, _mask(raw))
 
@@ -345,19 +380,19 @@ def check_persistence(report: Report) -> None:
             report.add(cat, "持久目录可写", PASS, str(PERSIST_DIR))
         except Exception as e:
             report.add(cat, "持久目录可写", FAIL, f"{PERSIST_DIR} 不可写：{e}",
-                       "设置环境变量 PERSISTENT_STORAGE_DIR 指向一个可写目录。")
+                       "设置环境变量 PERSISTENT_STORAGE_DIR 指向一个可写目录；"
+                       "或确认 ModelScope 创空间的「持久化卷」开关已打开（默认即 /mnt/workspace）。")
 
     with _guard(report, cat, "存储易失性"):
-        from data.storage import pg_store
-        env_dir = os.environ.get("PERSISTENT_STORAGE_DIR")
-        if pg_store.is_enabled():
-            report.add(cat, "存储易失性", PASS, "已接入云数据库，重部署不丢数据")
-        elif env_dir:
-            report.add(cat, "存储易失性", PASS, f"使用持久挂载目录 {env_dir}")
+        ok, hint = _persist_layer_status()
+        if ok:
+            report.add(cat, "存储易失性", PASS, hint)
         else:
-            report.add(cat, "存储易失性", WARN, "写在容器本地磁盘",
-                       "Streamlit Cloud 重部署会清空。配置 DATABASE_URL（云数据库）"
-                       "或 PERSISTENT_STORAGE_DIR（持久盘）二选一。")
+            report.add(cat, "存储易失性", WARN,
+                       f"未识别到持久层：{hint}",
+                       "① 检查 ModelScope 创空间「设置 → 持久化卷」是否已开启（开启后代码会自动用 /mnt/workspace）；"
+                       "② 若已开启仍 WARN，请确认环境变量 PERSISTENT_STORAGE_DIR 未指向临时路径；"
+                       "③ 终极方案：配 DATABASE_URL 接入云 Postgres。")
 
 
 # ============================================================
