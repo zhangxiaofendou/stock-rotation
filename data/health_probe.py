@@ -209,10 +209,13 @@ def verdict_ths(probe: dict) -> str:
     """根据同花顺探针结果给出人话结论。"""
     if probe["kline_ok"]:
         dt = probe["kline_date"]
+        if not probe["list_ok"]:
+            return (f"⚠️ 同花顺K线可达，抽样(半导体881121)最新 {dt}；"
+                    "行业清单接口暂不可达，板块宇宙使用静态兜底，行情数据不受影响")
         if dt and dt > "2026-07-30":
-            return (f"✅ 同花顺行业K线可达，抽样(半导体881121)最新 {dt}，"
+            return (f"✅ 同花顺行业K线与清单可达，抽样(半导体881121)最新 {dt}，"
                     f"数据应已到最新交易日")
         return f"⚠️ 同花顺K线可达但抽样最新仅 {dt}，仍偏旧（可能部分板块滞后）"
     if probe["list_ok"]:
         return "❌ 同花顺行业清单可达但K线失败，将回退 AkShare → 数据可能滞后"
-    return "❌ 同花顺整体不可达（清单/K线均失败），将回退 AkShare → 数据滞后"
+    return "❌ 同花顺行业清单与K线均不可达，将回退 AkShare → 数据可能滞后"
