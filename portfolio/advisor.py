@@ -124,15 +124,16 @@ class PortfolioAdvisor:
                     state,
                 ))
 
-            sector_cost = float(sector_costs.loc[sector_name])
-            sector_ratio = sector_cost / total_cost
-            if sector_name and sector_ratio >= 0.40:
-                items.append(self._item(
-                    "高" if sector_ratio >= 0.60 else "中", "行业集中度", code, name,
-                    f"“{sector_name}”行业成本占组合 {sector_ratio:.1%}，请按行业整体而非单只股票复核暴露。",
-                    "阈值：同一行业成本占组合不低于 40%。",
-                    state,
-                ))
+            if sector_name:
+                sector_cost = float(sector_costs.loc[sector_name])
+                sector_ratio = sector_cost / total_cost
+                if sector_ratio >= 0.40:
+                    items.append(self._item(
+                        "高" if sector_ratio >= 0.60 else "中", "行业集中度", code, name,
+                        f"“{sector_name}”行业成本占组合 {sector_ratio:.1%}，请按行业整体而非单只股票复核暴露。",
+                        "阈值：同一行业成本占组合不低于 40%。",
+                        state,
+                    ))
 
         result = pd.DataFrame(items)
         if result.empty:

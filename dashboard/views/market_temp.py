@@ -131,8 +131,6 @@ def load_market_data():
 
 def render():
     """渲染市场温度计页面"""
-    import plotly.graph_objects as go  # 懒加载:plotly ~10MB,只在打开本页时加载
-    import plotly.express as px        # 同上
     st.title("市场温度计")
     st.markdown("监控整体市场环境、板块状态分布和风格强弱")
 
@@ -241,6 +239,7 @@ def _render_fund_flow_map():
 def _render_market_overview():
     """渲染市场概览（原市场温度计内容）"""
     import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
+    import plotly.express as px        # 懒加载:饼图 px.pie 用,必须在本函数作用域内导入
     with st.spinner("加载市场数据..."):
         market_status, state_df, state_dist, up_count, down_count, flat_count, group_stats = load_market_data()
 
