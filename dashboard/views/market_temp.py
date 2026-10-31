@@ -357,10 +357,16 @@ def _render_market_overview():
         dist_data = []
         for state in ALL_STATES:
             codes = state_dist.get(state, [])
+            # 悬停用行业列表：代码→名称，每行 6 个避免 tooltip 过宽溢出
+            names = [get_sector_name(c) for c in codes]
+            sectors_text = "<br>".join(
+                "、".join(names[i:i + 6]) for i in range(0, len(names), 6)
+            ) if names else "—"
             dist_data.append({
                 "state": state,
                 "count": len(codes),
                 "color": STATE_COLORS.get(state, "#9E9E9E"),
+                "sectors": sectors_text,
             })
 
         dist_df = pd.DataFrame(dist_data)
@@ -390,9 +396,18 @@ def _render_market_overview():
             color="state",
             color_discrete_map={s: STATE_COLORS.get(s, "#9E9E9E") for s in dist_df["state"]},
             hole=0.4,
+            custom_data=["sectors"],
         )
         fig_pie.update_layout(height=400, margin={"l": 10, "r": 10, "t": 10, "b": 10})
-        fig_pie.update_traces(textposition="inside", textinfo="percent+label")
+        fig_pie.update_traces(
+            textposition="inside",
+            textinfo="percent+label",
+            hovertemplate=(
+                "<b>%{label}</b><br>板块数：%{value}（%{percent}）<br>"
+                "行业：%{customdata[0]}"
+                "<extra></extra>"
+            ),
+        )
         st.plotly_chart(fig_pie, width="stretch")
 
     # ================================================================
