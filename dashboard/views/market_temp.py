@@ -40,6 +40,33 @@ ALL_STATES = [
 ]
 
 
+def resolve_updown_data_date(state_df=None):
+    """解析涨跌分布应标注的数据日期。
+
+    优先用 freshness 表中「板块行情K线(sector_hist)」的真实最新日，
+    避免被过期的 state_snapshot 误导成旧日期；freshness 缺失时
+    才回退到 state_df 的快照日期。
+
+    返回: "YYYY-MM-DD" 或 ""。
+    """
+    _data_date = ""
+    try:
+        _fs = SQLiteStore().get_freshness_report()
+        if _fs is not None and not _fs.empty:
+            _sub = _fs[_fs["data_type"] == "sector_hist"]["data_end_date"].dropna().astype(str)
+            _valid = [str(d)[:10] for d in _sub if len(str(d)) == 10]
+            if _valid:
+                _data_date = max(_valid)
+    except Exception:
+        _data_date = ""
+    if not _data_date and state_df is not None and not state_df.empty:
+        try:
+            _data_date = str(state_df["date"].iloc[0])[:10]
+        except Exception:
+            _data_date = ""
+    return _data_date
+
+
 @st.cache_resource
 def get_stores():
     """获取数据存储实例（缓存）"""
@@ -287,7 +314,11 @@ def _render_market_overview():
     # ================================================================
     st.subheader("涨跌分布")
     render_src_badge("ths")
-    st.caption(f"基于各板块 {state_df['date'].iloc[0] if state_df is not None else ''} 当日涨跌幅统计（>+0.01% 为涨，<-0.01% 为跌）")
+    # 就地标注真实数据日期：优先 freshness 真实日，避免被旧快照误导
+    _data_date = resolve_updown_data_date(state_df)
+    st.caption(
+        f"数据截至 **{_data_date or '—'}**（板块当日涨跌幅口径：>+0.01% 为涨，<-0.01% 为跌）"
+    )
     total = up_count + down_count + flat_count
     if total > 0:
         c1, c2, c3 = st.columns(3)

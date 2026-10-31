@@ -191,6 +191,103 @@ def get_local_data_status():
     return latest_date, pd.DataFrame(rows)
 
 
+# 内部 data_type -> 用户可读的来源中文名（标注在页面上的"数据来源"维度）
+_SOURCE_LABELS = {
+    "benchmark_hist": "基准指数(沪深300)",
+    "indicators/rs": "RS相对强度",
+    "indicators/trend": "趋势指标",
+    "indicators/crowding": "拥挤度指标",
+    "sector_hist": "板块行情K线",
+    "sector_fund_flow": "板块资金流",
+    "sector_divergence": "板块分化度",
+    "signal_events": "信号事件",
+}
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def get_source_date_summary() -> pd.DataFrame:
+    """把内部 freshness 记录聚合成「用户可读的数据来源 + 最新日期 + 滞后天数」。
+
+    返回 DataFrame: 来源 / 最新数据日期 / 滞后天数 / 状态。
+    缺基准日期时滞后列显示「—」。
+    """
+    today = datetime.date.today()
+    store = SQLiteStore()
+    fresh_df = store.get_freshness_report()
+
+    rows = []
+    if fresh_df is not None and not fresh_df.empty:
+        for dtype in fresh_df["data_type"].unique():
+            label = _SOURCE_LABELS.get(dtype, dtype)
+            sub = fresh_df[fresh_df["data_type"] == dtype]
+            end_dates = [
+                str(d)[:10] for d in sub["data_end_date"].dropna().astype(str).tolist()
+                if str(d).lower() not in ("nan", "none") and len(str(d)) == 10
+            ]
+            latest_end = max(end_dates) if end_dates else "—"
+            has_error = (sub["status"] == "error").any()
+            lag = "—"
+            if latest_end != "—":
+                try:
+                    lag_days = (today - datetime.date.fromisoformat(latest_end)).days
+                    lag = f"{lag_days} 天前" if lag_days >= 0 else "未来"
+                except Exception:
+                    lag = "—"
+            rows.append({
+                "来源": label,
+                "最新数据日期": latest_end,
+                "滞后": lag,
+                "状态": "异常" if has_error else "正常",
+            })
+
+    # 补充「行业清单(同花顺)」来源：它不在 freshness 表里，用探针单独标
+    try:
+        from data.health_probe import probe_ths
+        p = probe_ths()
+        list_ok = bool(p.get("list_ok"))
+        rows.append({
+            "来源": "行业清单(同花顺)",
+            "最新数据日期": "实时" if list_ok else "不可达",
+            "滞后": "0 天前" if list_ok else "—",
+            "状态": "正常" if list_ok else "受限(反爬401)",
+        })
+    except Exception:
+        rows.append({
+            "来源": "行业清单(同花顺)",
+            "最新数据日期": "—",
+            "滞后": "—",
+            "状态": "探测失败",
+        })
+
+    # 补充「持仓数据」来源：本地上传/云库，无新鲜度记录时单独标注
+    try:
+        from portfolio.holdings import load_holdings
+        h = load_holdings()
+        if h is not None and not h.empty:
+            rows.append({
+                "来源": "持仓数据",
+                "最新数据日期": "已载入",
+                "滞后": "0 天前",
+                "状态": "正常",
+            })
+        else:
+            rows.append({
+                "来源": "持仓数据",
+                "最新数据日期": "无",
+                "滞后": "—",
+                "状态": "空",
+            })
+    except Exception:
+        rows.append({
+            "来源": "持仓数据",
+            "最新数据日期": "—",
+            "滞后": "—",
+            "状态": "读取失败",
+        })
+
+    return pd.DataFrame(rows)
+
+
 def run_manual_data_update() -> tuple:
     """启动后台线程执行完整数据管线（非阻塞），返回 (started, message)。
 
@@ -635,22 +732,26 @@ def main():
             pass
         effective_live = live_realtime and not _pipeline_running
 
-        # 各数据类型最新日期明细
-        if summary_df is not None and not summary_df.empty:
-            st.markdown("##### 各数据类型最新日期")
-            st.dataframe(
-                summary_df,
-                hide_index=True,
-                column_config={
-                    "数据类型": st.column_config.TextColumn("数据类型"),
-                    "最新数据日期": st.column_config.TextColumn("最新数据日期"),
-                    "最后更新时间": st.column_config.TextColumn("最后更新时间"),
-                    "记录数": st.column_config.NumberColumn("记录数"),
-                    "状态": st.column_config.TextColumn("状态"),
-                },
-            )
-        else:
-            st.info("暂无数据新鲜度记录")
+        # 各数据来源最新日期明细（用户可读维度，覆盖行情/指标/资金流/持仓/行业清单）
+        try:
+            src_summary = get_source_date_summary()
+            if src_summary is not None and not src_summary.empty:
+                st.markdown("##### 📅 各数据来源最新日期")
+                st.dataframe(
+                    src_summary,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "来源": st.column_config.TextColumn("来源", width="medium"),
+                        "最新数据日期": st.column_config.TextColumn("最新数据日期"),
+                        "滞后": st.column_config.TextColumn("滞后"),
+                        "状态": st.column_config.TextColumn("状态"),
+                    },
+                )
+            else:
+                st.info("暂无数据新鲜度记录")
+        except Exception:
+            pass
 
         st.markdown("---")
 
