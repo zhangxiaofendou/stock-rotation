@@ -121,7 +121,7 @@ def main():
     state = {"pos": None, "rows": [], "tx": []}
     conns = []
 
-    def fake_connect(url):
+    def fake_connect(url, **kwargs):
         c = FakeConn(state)
         conns.append(c)
         return c

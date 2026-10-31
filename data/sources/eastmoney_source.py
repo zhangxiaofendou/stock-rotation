@@ -101,13 +101,18 @@ def _secid_of_index(code: str) -> Optional[str]:
 
 
 def _secid_of_stock(code: str) -> Optional[str]:
-    """把个股代码（600519）转为东财 secid（1.600519）。空串/非字符串返回 None。"""
+    """把个股/ETF/北交所代码转为东财 secid。
+
+    沪市(6/9 开头，含 5 开头沪ETF) → 1. ；深市(0/3 开头，含 1 开头深ETF) 与
+    北交所(8 开头) → 0. 。非 6 位数字、B 股(2 开头)或其它非法输入返回 None。
+    """
     code = str(code).strip()
-    if not code:
+    if not code.isdigit() or len(code) != 6:
         return None
-    if code[0] in ("6", "9"):
+    head = code[0]
+    if head in ("6", "9", "5"):
         return f"1.{code}"
-    if code[0] in ("0", "3"):
+    if head in ("0", "3", "1", "8"):
         return f"0.{code}"
     return None
 
@@ -284,19 +289,30 @@ class EastMoneyLiveSource(BaseDataSource):
             return None
 
     def _quote(self, secids, fields="f43,f57,f58,f169,f170,f86"):
-        """东方财富 push2 实时快照。返回 list[dict]，失败返回 []。"""
+        """东方财富 push2 实时快照。返回 list[dict]，失败返回 []。
+
+        东财 push2 对 ETF(1/5 开头)常因「Remote end closed」瞬时断连，
+        做 1 次重试（共 2 次尝试）以提高命中率；全部失败返回 [] 不抛异常。
+        """
         if isinstance(secids, str):
             secids = [secids]
         secids = ",".join(secids)
         url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={secids}&fields={fields}"
-        try:
-            req = urllib.request.Request(url, headers=_HEADERS)
-            raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
-            d = json.loads(raw)
-            if d.get("data"):
-                return [d["data"]]
-        except Exception as e:
-            logger.warning("东财实时快照失败: %s", e)
+        for attempt in range(2):  # 首次 + 1 次重试
+            try:
+                req = urllib.request.Request(url, headers=_HEADERS)
+                raw = urllib.request.urlopen(req, timeout=12).read().decode("utf-8", "ignore")
+                d = json.loads(raw)
+                data = d.get("data")
+                if not data:
+                    return []
+                # 单 secid 时东财返回 dict；多 secid 时返回 list（每项一个 secid）。
+                # 必须区分，否则把 list 当 dict 用会丢行。
+                if isinstance(data, list):
+                    return data
+                return [data]
+            except Exception as e:
+                logger.warning("东财实时快照失败(第%d次): %s", attempt + 1, e)
         return []
 
     def get_realtime_sector_quotes(self, secids: Optional[list] = None) -> list:
