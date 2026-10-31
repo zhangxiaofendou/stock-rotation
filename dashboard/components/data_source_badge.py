@@ -98,6 +98,82 @@ def _base_chips_html(base) -> str:
     )
 
 
+# 来源/底数 → freshness 表里的 data_type 映射（用于标注「数据截至」日期）。
+# 值为 None 表示该来源无固定数据日期（实时快照/用户维护），不标注日期。
+_KEY_TO_DTYPE = {
+    "ths": "sector_hist",
+    "em": "benchmark_hist",
+    "tencent": None,          # 盘中实时快照，无历史日期
+    "derived": None,          # 由 base 决定；无 base 时取全表最新
+    "ths_kline": "sector_hist",
+    "em_flow": "sector_fund_flow",
+    "seed": None,             # 本地种子样本
+    "user": None,             # 用户录入
+    "history": "signal_events",
+}
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def _freshness_max_date(dtypes: tuple) -> str:
+    """查 freshness 表里指定 data_type（元组）的最新数据日期；查不到返回 ""。"""
+    try:
+        from data.storage.sqlite_store import SQLiteStore
+        fresh = SQLiteStore().get_freshness_report()
+        if fresh is None or fresh.empty:
+            return ""
+        sub = fresh[fresh["data_type"].isin(list(dtypes))]
+        if sub.empty:
+            return ""
+        ends = [
+            str(d)[:10] for d in sub["data_end_date"].dropna().astype(str).tolist()
+            if str(d).lower() not in ("nan", "none") and len(str(d)) == 10
+        ]
+        return max(ends) if ends else ""
+    except Exception:
+        return ""
+
+
+def _date_chip_html(keys, base) -> str:
+    """生成「数据截至 YYYY-MM-DD」小字标（拼在徽标行末尾）。
+
+    日期取自 freshness 真实记录（与侧栏「数据状态」同源），非系统时间——
+    数据没更新时如实显示旧日期，不谎报。取不到日期时不显示（避免误导）。
+    """
+    dtypes = set()
+    for k in keys:
+        d = _KEY_TO_DTYPE.get(k)
+        if d:
+            dtypes.add(d)
+    if base:
+        bases = [base] if isinstance(base, str) else list(base)
+        for b in bases:
+            d = _KEY_TO_DTYPE.get(b)
+            if d:
+                dtypes.add(d)
+    # derived 无 base（或映射为空）→ 回退取全表最新日期；
+    # 其余无映射来源（腾讯实时/用户录入等）不显示日期
+    if not dtypes:
+        if "derived" not in keys:
+            return ""
+        try:
+            from data.storage.sqlite_store import SQLiteStore
+            fresh = SQLiteStore().get_freshness_report()
+            if fresh is not None and not fresh.empty:
+                dtypes = set(fresh["data_type"].dropna().unique())
+        except Exception:
+            dtypes = set()
+    if not dtypes:
+        return ""
+    date = _freshness_max_date(tuple(sorted(dtypes)))
+    if not date:
+        return ""
+    return (
+        f'<span style="font-size:10px;color:#888;margin-left:2px;" '
+        f'title="该数据块底层数据的最新日期（取自数据新鲜度记录）">'
+        f'数据截至 <b>{date}</b></span>'
+    )
+
+
 def src_badge_html(*keys: str, prefix: str = "🏷 数据来源", base=None) -> str:
     """生成一组来源徽标的 HTML 字符串（供 unsafe_allow_html 渲染）。
 
@@ -120,10 +196,11 @@ def src_badge_html(*keys: str, prefix: str = "🏷 数据来源", base=None) -> 
         )
     joined = "".join(chips)
     base_html = _base_chips_html(base) if "derived" in valid else ""
+    date_html = _date_chip_html(valid, base if "derived" in valid else None)
     return (
         f'<div style="margin:2px 0 6px;line-height:1.6;">'
         f'<span style="font-size:11px;color:#888;margin-right:4px;">{prefix}：</span>'
-        f'{joined}{base_html}</div>'
+        f'{joined}{base_html}{date_html}</div>'
     )
 
 
