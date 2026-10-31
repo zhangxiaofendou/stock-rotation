@@ -33,6 +33,47 @@ from config.settings import PARQUET_DIR
 logger = get_logger(__name__)
 
 
+def _max_date_in_dir(d: str, col: str = "date"):
+    """返回目录下所有 parquet 文件某日期列的最大日期；无则返回 None。"""
+    if not os.path.isdir(d):
+        return None
+    files = [f for f in os.listdir(d) if f.endswith(".parquet")]
+    if not files:
+        return None
+    mx = None
+    for f in files:
+        try:
+            s = pd.read_parquet(os.path.join(d, f), columns=[col])[col]
+            cur = pd.to_datetime(s).max()
+            if mx is None or cur > mx:
+                mx = cur
+        except Exception:
+            continue
+    return mx
+
+
+def is_snapshot_stale(snapshot_path: str, rs_dir: str) -> bool:
+    """判断 state_snapshot 是否过期（底层 RS 数据已比快照更新）。
+
+    返回 True 表示快照日期 < 底层 RS 真实最新日期，应丢弃快照重算；
+    返回 False 表示快照仍有效（或无法判定，保守当有效）。
+    """
+    if not os.path.exists(snapshot_path):
+        return False
+    try:
+        cached = pd.read_parquet(snapshot_path)
+        if cached.empty or "date" not in cached.columns:
+            return False
+        snap_date = str(pd.to_datetime(cached["date"]).max().date())
+        real_date = _max_date_in_dir(rs_dir)
+        real_date = str(real_date)[:10] if real_date else ""
+        if real_date and snap_date < real_date:
+            return True
+    except Exception:
+        return False
+    return False
+
+
 class StateMachine:
     """九宫格状态机"""
 
@@ -477,6 +518,14 @@ class StateMachine:
     # ============================================================
     # 批量计算所有板块状态
     # ============================================================
+    @staticmethod
+    def _max_date_in_dir(d: str, col: str = "date"):
+        """返回目录下所有 parquet 文件某日期列的最大日期；无则返回 None。
+
+        转发到模块级 _max_date_in_dir（单一事实来源）。
+        """
+        return _max_date_in_dir(d, col=col)
+
     def calc_all_sectors_state(self, date: str = None) -> Optional[pd.DataFrame]:
         """
         计算所有板块在指定日期的状态
@@ -498,14 +547,22 @@ class StateMachine:
         snapshot_path = os.path.join(cache_dir, "state_snapshot.parquet")
 
         # 尝试从快照加载（仅当 date=None 即查最新日期时有效）
-        # 快照由 daily_update.py 在数据更新后自动清除，所以只要存在就是最新的
+        # 一致性校验：快照里记录的「数据日期」必须与底层 RS 指标目录的真实最新
+        # 日期一致，否则说明底层数据已被 daily_update 刷新、快照已过期——必须丢弃
+        # 并全量重算，否则看板会被停更的旧快照永久误导（如停在 2026-08-24）。
         if date is None and os.path.exists(snapshot_path):
+            rs_dir = os.path.join(str(PARQUET_DIR), "indicators", "rs")
             try:
                 cached = pd.read_parquet(snapshot_path)
                 if not cached.empty and "date" in cached.columns:
-                    logger.info(f"从快照缓存加载板块状态, {len(cached)} 个板块, "
-                                f"数据日期: {str(cached['date'].max())[:10]}")
-                    return cached
+                    if is_snapshot_stale(snapshot_path, rs_dir):
+                        logger.warning(
+                            f"快照过期(底层RS已更新)，丢弃并全量重算")
+                    else:
+                        snap_date = str(pd.to_datetime(cached["date"]).max().date())
+                        logger.info(f"从快照缓存加载板块状态, {len(cached)} 个板块, "
+                                    f"数据日期: {snap_date}")
+                        return cached
             except Exception as e:
                 logger.warning(f"快照缓存读取失败: {e}")
 

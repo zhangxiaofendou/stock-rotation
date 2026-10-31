@@ -704,6 +704,16 @@ def main():
         except Exception:
             logger.warning("管线收尾：parquet 镜像上传失败（非致命）", exc_info=True)
 
+        # 管线成功收尾：删除旧 state_snapshot，强制下次 calc_all_sectors_state
+        # 用底层最新指标重算（与 model.state_machine 的一致性校验双保险）。
+        # 仅当本次非失败时清理，避免失败场景下误删用户已有快照。
+        if run_status != "failed":
+            try:
+                from data.daily_update import invalidate_snapshots
+                invalidate_snapshots()
+            except Exception:
+                logger.warning("管线收尾：快照清理失败（非致命）", exc_info=True)
+
 
 if __name__ == "__main__":
     main()

@@ -312,26 +312,53 @@ def run_manual_data_update() -> tuple:
 
 
 def _maybe_auto_refresh_on_stale():
-    """Reboot/重部署后 Git 旧 seed 会覆盖本地最新 parquet，导致 K线/板块数据退回旧日期。
+    """Reboot/重部署后若本地数据落后，自动后台跑一次完整管线恢复最新。
 
-    本函数在 App 启动后检测：若本地数据最新日期落后于数据源最新交易日，
-    则后台自动跑一次完整管线（非阻塞），把数据恢复到最新。无需用户手动点击，
-    也无需改动 Streamlit Cloud 配置。侧栏会显示「⏳ 管线运行中」实时进度。
+    判定逻辑（**完全本地、不依赖被墙的数据源联网**）：
+      1. 用本地交易日历求「最近一个收盘数据已可得的交易日」target
+         （data.daily_pipeline.latest_trading_day，优先真实日历，回退 weekday）。
+      2. 取本地 freshness 最新日期 local（get_local_data_status）。
+      3. 若 local < target 或底层产物未达 target（data_is_current 为 False），
+         说明数据过期 → 触发后台管线。
+
+    轻量重试：每次会话用「上次触发时间」做节流——若距上次触发已超 6 小时且
+    数据仍过期，会再次触发（解决「只试一次就放弃」的问题）。侧栏显示实时进度。
     """
     try:
+        # 0) 管线正在跑则不打扰
         progress = _load_progress()
         if progress.get("status") == "running":
-            return  # 已在后台运行，避免重复触发
-        src = get_latest_source_date()            # 数据源最新交易日
-        local, _ = get_local_data_status()        # 本地各数据最新日期
-        needs = bool(src) and (not local or src > local)
-        if not needs:
-            # 已是最新：重置会话标记，便于下次真正落后时再次触发
-            st.session_state.pop("_auto_refresh_done", None)
             return
-        if st.session_state.get("_auto_refresh_done"):
-            return  # 本次会话已尝试过（失败则不无限重试，用户可手动点按钮）
+
+        # 1) 最近一个收盘已可得的交易日（本地日历，绝不联网）
+        from data.daily_pipeline import latest_trading_day, data_is_current
+        today = datetime.date.today().strftime("%Y-%m-%d")
+        target = latest_trading_day(today)
+        if not target:
+            return
+
+        # 2) 本地数据最新日期
+        local, _ = get_local_data_status()
+
+        # 3) 是否过期：本地落后 或 底层产物未达 target
+        stale = (not local) or (local < target) or (not data_is_current(target))
+
+        if not stale:
+            # 已是最新：清掉节流标记，便于未来真正落后时再触发
+            st.session_state.pop("_auto_refresh_done", None)
+            st.session_state.pop("_auto_refresh_at", None)
+            return
+
+        # 节流：距上次触发不足 6 小时则跳过（避免每次 rerun 都重触发）
+        last_at = st.session_state.get("_auto_refresh_at")
+        now_ts = time.time()
+        if last_at is not None and (now_ts - float(last_at)) < 6 * 3600:
+            return
+
         st.session_state["_auto_refresh_done"] = True
+        st.session_state["_auto_refresh_at"] = now_ts
+        logger.info(f"检测到本地数据过期(local={local}, target={target})，"
+                    f"自动触发后台管线刷新")
         threading.Thread(target=_background_pipeline_run, daemon=True).start()
     except Exception:
         logger.warning("启动自动刷新判断失败", exc_info=True)
