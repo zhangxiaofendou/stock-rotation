@@ -806,7 +806,10 @@ def main():
             from data.storage import pg_store as _pg
             _st = _pg.storage_status()
             if _st["safe"]:
-                st.success(f"💾 云数据库已连通，数据持久安全：{_st['detail']}")
+                if _st.get("backend") == "persist-volume":
+                    st.success(f"💾 持久卷已接管，数据重启不丢：{_st['detail']}")
+                else:
+                    st.success(f"💾 云数据库已连通，数据持久安全：{_st['detail']}")
             else:
                 st.error(f"⚠️ 数据不安全：{_st['detail']}")
         except Exception:

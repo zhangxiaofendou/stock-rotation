@@ -63,11 +63,32 @@ def storage_status() -> dict:
     """返回当前存储后端真实状态，让界面暴露「数据是否会丢」。
 
     返回字段：
-      backend: "postgres" | "sqlite" | "sqlite-fallback"
+      backend: "postgres" | "sqlite" | "sqlite-fallback" | "persist-volume"
       safe:    数据是否安全（重部署不丢）
       detail:  人类可读说明
     """
     if not is_enabled():
+        # 没配云库时，先判断持久卷是否已接管（ModelScope /mnt/workspace 等）。
+        # 若已接管，数据重启不丢，不应报「不安全」。
+        try:
+            from config.settings import PERSIST_DIR, PERSIST_DIR_SOURCE
+            _path = str(PERSIST_DIR).replace("\\", "/").rstrip("/")
+            if _path.startswith("/mnt/workspace") or _path == "/mnt/workspace":
+                return {
+                    "backend": "persist-volume",
+                    "safe": True,
+                    "detail": f"未配置 DATABASE_URL，但 ModelScope 持久卷 {_path} 已接管，"
+                              f"重部署/Restart Studio 数据不丢，无需配置云库。",
+                }
+            if PERSIST_DIR_SOURCE == "PERSISTENT_STORAGE_DIR":
+                return {
+                    "backend": "persist-volume",
+                    "safe": True,
+                    "detail": f"未配置 DATABASE_URL，但持久目录 {PERSIST_DIR} 已生效，"
+                              f"重启不丢数据，无需配置云库。",
+                }
+        except Exception:
+            pass
         return {
             "backend": "sqlite",
             "safe": False,
