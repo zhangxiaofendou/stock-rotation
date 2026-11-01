@@ -689,6 +689,22 @@ def main():
     # 绝不无限转圈。全局 socket.setdefaulttimeout(12) 是主防线，这里双保险。
     _with_timeout(ensure_universe, seconds=15, default=None)
 
+    # 持仓行业自检：每次会话首次进入时，扫描当前用户全部持仓，行业缺失的
+    # 按代码反查（东财/腾讯，带缓存）并写回账本——入口漏补的这里兜底固化。
+    # 超时 10s 保护；补全成功轻提示，失败静默绝不阻断启动。
+    if not st.session_state.get("_sector_autofill_done"):
+        try:
+            from dashboard.views.portfolio import autofill_missing_sectors
+            _filled = _with_timeout(
+                lambda: autofill_missing_sectors(user_id=current_user),
+                seconds=10, default=0,
+            )
+            if _filled:
+                st.toast(f"已自动补全 {_filled} 个持仓的行业信息")
+        except Exception:
+            pass
+        st.session_state["_sector_autofill_done"] = True
+
     # ================================================================
     # 侧边栏
     # ================================================================

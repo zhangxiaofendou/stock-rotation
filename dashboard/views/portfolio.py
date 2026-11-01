@@ -410,7 +410,10 @@ def _is_blank_name(v) -> bool:
 
 def _sector_name_fallback(code: str) -> str:
     """按代码单独补查行业名（session 级缓存，避免每次渲染重复打网）。"""
-    cache = st.session_state.setdefault("_sector_name_lookup_cache", {})
+    try:
+        cache = st.session_state.setdefault("_sector_name_lookup_cache", {})
+    except Exception:  # noqa: BLE001 — 无 Streamlit 运行上下文（测试/后台线程）时降级为无缓存
+        cache = {}
     if code in cache:
         return str(cache[code] or "")
     try:
@@ -457,6 +460,35 @@ def _persist_sector(service, code: str, name: str) -> None:
         service.update_metadata(code, sector_name=name)
     except Exception:
         pass
+
+
+def autofill_missing_sectors(user_id: str, max_lookup: int = 20) -> int:
+    """App 启动自检：扫描当前用户全部持仓，行业缺失的按代码反查并写回账本。
+
+    与 fill_sector_display 的页面级兜底互补：本函数在登录后跑一次，
+    无论用户先访问哪个页面都先把行业固化进账本。返回本次补全的标的数。
+    lookup 自带进程级缓存与异常吞噬，永不抛出。
+    """
+    try:
+        service = PortfolioHoldings(user_id=str(user_id))
+        positions = service.positions()
+    except Exception:  # noqa: BLE001 — 自检失败绝不阻断 App 启动
+        return 0
+    if positions is None or positions.empty or "sector_name" not in positions.columns:
+        return 0
+    blank = positions[positions["sector_name"].map(_is_blank_name)]
+    if blank.empty:
+        return 0
+    filled = 0
+    for _, r in blank.head(max_lookup).iterrows():
+        code = str(r.get("security_code") or "").strip()
+        if not code:
+            continue
+        name = _sector_name_fallback(code)
+        if name:
+            _persist_sector(service, code, name)
+            filled += 1
+    return filled
 
 
 def _render_positions(service: PortfolioHoldings):
