@@ -968,6 +968,23 @@ class SQLiteStore:
         finally:
             conn.close()
 
+    def get_transactions_for_dedup(self, user_id: str) -> list[tuple]:
+        """返回该用户已有逐笔交易的去重原始字段：(trade_date, security_code, side, quantity, price)。
+
+        供导入去重比对使用；去重键的具体规则由 portfolio.trade_import.trade_dedup_key 统一计算，
+        本方法只负责把库里已有的行原样取出。
+        """
+        conn = self._get_conn()
+        try:
+            rows = conn.execute(
+                "SELECT trade_date, security_code, side, quantity, price "
+                "FROM portfolio_transactions WHERE user_id = ?",
+                (str(user_id),),
+            ).fetchall()
+            return [(r["trade_date"], r["security_code"], r["side"], r["quantity"], r["price"]) for r in rows]
+        finally:
+            conn.close()
+
     def update_portfolio_metadata(self, user_id: str, security_code: str, **fields) -> None:
         """仅更新当前用户持仓元数据，不写交易流水、不改数量/成本。"""
         allowed = {"security_name", "asset_type", "sector_code", "sector_name", "target_weight", "stop_loss", "note"}

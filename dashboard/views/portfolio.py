@@ -22,7 +22,7 @@ from portfolio.holdings import PortfolioHoldings
 from portfolio.advisor import PortfolioAdvisor
 from portfolio.stock_lookup import lookup_stock_info, normalize_code, resolve_sector
 from portfolio.fees import estimate_trade_fee
-from portfolio.trade_import import parse_trades, trades_to_records
+from portfolio.trade_import import parse_trades, trades_to_records, trade_dedup_key
 from dashboard.components.data_source_badge import render_src_badge
 from dashboard.components.state_grid import STATE_COLORS
 from dashboard.components.version_indicator import render_version_indicator
@@ -966,6 +966,26 @@ def render():
     _render_import_panel(service)
 
 
+def _annotate_import_duplicates(records: list[dict], service: PortfolioHoldings) -> int:
+    """标记预览记录中与已登记交易重复的条目（duplicate=True 并追加提示），返回重复笔数。
+
+    去重键由 portfolio.trade_import.trade_dedup_key 统一计算，与确认写入时完全一致。
+    """
+    existing = service.store.get_transactions_for_dedup(service.user_id)
+    existing_keys = {trade_dedup_key(d, c, s, q, p) for (d, c, s, q, p) in existing}
+    dup = 0
+    for rec in records:
+        key = trade_dedup_key(
+            rec.get("trade_date"), rec.get("security_code"), rec.get("side"),
+            rec.get("quantity"), rec.get("price"),
+        )
+        if key in existing_keys:
+            rec["duplicate"] = True
+            rec["warn"] = (rec.get("warn") or "") + "；与已登记记录重复，确认导入时将自动跳过"
+            dup += 1
+    return dup
+
+
 def _render_import_panel(service: PortfolioHoldings):
     """批量导入逐笔交易：粘贴 / 上传 CSV·Excel → 解析 → 可编辑预览 → 确认写入。
 
@@ -1006,8 +1026,14 @@ def _render_import_panel(service: PortfolioHoldings):
             for e in errors:
                 st.warning(e)
             if trades:
-                st.session_state["import_preview"] = trades_to_records(trades)
-                st.success(f"解析出 {len(trades)} 笔，请在下表核对/修改后点「确认导入」")
+                records = trades_to_records(trades)
+                dup = _annotate_import_duplicates(records, service)
+                st.session_state["import_preview"] = records
+                msg = f"解析出 {len(records)} 笔"
+                if dup:
+                    msg += f"，其中 {dup} 笔与已登记记录重复（将自动跳过，见下表「重复」列）"
+                msg += "，请在下表核对/修改后点「确认导入」"
+                st.success(msg)
             else:
                 st.error("没有解析出任何交易记录（请检查内容或表头）")
                 st.session_state.pop("import_preview", None)
@@ -1017,7 +1043,7 @@ def _render_import_panel(service: PortfolioHoldings):
             df = pd.DataFrame(preview)
             edit_cols = [
                 "trade_date", "security_code", "security_name", "side",
-                "quantity", "price", "fee", "warn", "ok",
+                "quantity", "price", "fee", "duplicate", "warn", "ok",
             ]
             df = df[ [c for c in edit_cols if c in df.columns] ]
             edited = st.data_editor(
@@ -1030,6 +1056,10 @@ def _render_import_panel(service: PortfolioHoldings):
                         "方向", options=["BUY", "SELL", "ADJUST"],
                         help="BUY=买入 / SELL=卖出 / ADJUST=调账",
                     ),
+                    "duplicate": st.column_config.CheckboxColumn(
+                        "重复(只读)", disabled=True,
+                        help="与已登记记录重复，确认导入时自动跳过",
+                    ),
                     "warn": st.column_config.TextColumn("提示(只读)", disabled=True),
                     "ok": st.column_config.CheckboxColumn("可导入", disabled=True),
                 },
@@ -1038,10 +1068,19 @@ def _render_import_panel(service: PortfolioHoldings):
                 _import_confirm(service, edited)
 
 
-def _import_confirm(service: PortfolioHoldings, edited: pd.DataFrame):
-    """逐条写入解析结果，汇总成功/失败。单条异常不中断其余。"""
+def _apply_import(service: PortfolioHoldings, edited: pd.DataFrame) -> tuple[int, int, list[str]]:
+    """执行导入（写库 + 去重），返回 (成功笔数, 跳过笔数, 失败明细)。不触碰 Streamlit 状态，便于测试。
+
+    去重实时重算：拉取库里已有交易的去重键集合，写入一笔后立即并入集合，
+    因此「历史已存在」与「本批内重复」都能正确跳过。
+    """
     ok_count = 0
+    skipped = 0
     fails: list[str] = []
+    existing = {
+        trade_dedup_key(d, c, s, q, p)
+        for (d, c, s, q, p) in service.store.get_transactions_for_dedup(service.user_id)
+    }
     for _, r in edited.iterrows():
         code = str(r.get("security_code", "")).strip()
         name = str(r.get("security_name", "")).strip() or code
@@ -1062,6 +1101,10 @@ def _import_confirm(service: PortfolioHoldings, edited: pd.DataFrame):
         if qty <= 0 or price < 0:
             fails.append(f"{code}: 数量必须>0、价格≥0")
             continue
+        key = trade_dedup_key(str(r.get("trade_date", "")).strip(), code, side, qty, price)
+        if key in existing:
+            skipped += 1
+            continue
         try:
             service.record_trade(
                 security_code=code,
@@ -1074,11 +1117,19 @@ def _import_confirm(service: PortfolioHoldings, edited: pd.DataFrame):
                 note="批量导入",
             )
             ok_count += 1
+            existing.add(key)
         except Exception as exc:
             fails.append(f"{code} {r.get('trade_date', '')}: {exc}")
+    return ok_count, skipped, fails
 
+
+def _import_confirm(service: PortfolioHoldings, edited: pd.DataFrame):
+    """逐条写入解析结果，自动跳过与已登记记录重复的行，汇总成功/跳过/失败。"""
+    ok_count, skipped, fails = _apply_import(service, edited)
     if ok_count:
         st.success(f"✅ 成功导入 {ok_count} 笔")
+    if skipped:
+        st.info(f"⏭️ 已自动跳过 {skipped} 笔与已登记记录重复的交易")
     if fails:
         st.error("以下记录导入失败：\n" + "\n".join(fails))
     st.session_state.pop("import_preview", None)

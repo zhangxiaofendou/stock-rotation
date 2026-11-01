@@ -68,3 +68,6 @@ _贵金属评分详解.html
 _行业状态评审报告.html
 industry_state_review.html
 _*.html
+
+# Runtime local state — never commit; cloud uses persistent volume (/mnt/workspace)
+.persist/

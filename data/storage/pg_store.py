@@ -723,3 +723,20 @@ class PGStore:
             raise
         finally:
             conn.close()
+
+    def get_transactions_for_dedup(self, user_id: str) -> list[tuple]:
+        """返回该用户已有逐笔交易的去重原始字段：(trade_date, security_code, side, quantity, price)。
+
+        供导入去重比对；去重键规则由 portfolio.trade_import.trade_dedup_key 统一计算。
+        """
+        conn = connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT trade_date, security_code, side, quantity, price "
+                    "FROM portfolio_transactions WHERE user_id = %s",
+                    (str(user_id),),
+                )
+                return [(r[0], r[1], r[2], r[3], r[4]) for r in cur.fetchall()]
+        finally:
+            conn.close()

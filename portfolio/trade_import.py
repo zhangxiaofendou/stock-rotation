@@ -33,6 +33,7 @@ class ParsedTrade:
     note: str = ""
     ok: bool = True
     warn: str = ""  # 该行的非致命提示（缺日期、名称占位等）
+    duplicate: bool = False  # 与已登记记录重复（预览阶段标记，确认写入时跳过）
 
 
 # 目标字段 → 候选别名（归一化后小写匹配）。顺序即匹配优先级，靠前的先抢列。
@@ -309,5 +310,28 @@ def parse_trades(
 
 def trades_to_records(trades: list[ParsedTrade]) -> list[dict]:
     """转成可直接展示/导入的 dict 列表（剔除 dataclass 内部字段的冗余）。"""
-    keep = ["trade_date", "security_code", "security_name", "side", "quantity", "price", "fee", "warn", "ok"]
+    keep = ["trade_date", "security_code", "security_name", "side", "quantity", "price", "fee", "warn", "ok", "duplicate"]
     return [{k: getattr(t, k) for k in keep} for t in trades]
+
+
+def trade_dedup_key(trade_date, security_code, side, quantity, price) -> tuple:
+    """逐笔交易去重键：同一天 + 同代码 + 同方向 + 数量(2位) + 价格(2位) 视为同一笔。
+
+    价格取 2 位小数（A股精确到分），数量取 2 位小数（防浮点误差），足以区分不同成交，
+    又能容忍券商导出时同笔交易价格的小数尾差。规则单点定义，store 与应用层共用。
+    """
+    try:
+        q = round(float(quantity if quantity is not None else 0), 2)
+    except (TypeError, ValueError):
+        q = 0.0
+    try:
+        p = round(float(price if price is not None else 0), 2)
+    except (TypeError, ValueError):
+        p = 0.0
+    return (
+        str(trade_date or "").strip(),
+        _extract_code(security_code) or str(security_code or "").strip().upper(),
+        str(side or "").strip().upper(),
+        q,
+        p,
+    )
