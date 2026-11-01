@@ -22,6 +22,7 @@ from portfolio.holdings import PortfolioHoldings
 from portfolio.advisor import PortfolioAdvisor
 from portfolio.stock_lookup import lookup_stock_info, normalize_code, resolve_sector
 from portfolio.fees import estimate_trade_fee
+from portfolio.trade_import import parse_trades, trades_to_records
 from dashboard.components.data_source_badge import render_src_badge
 from dashboard.components.state_grid import STATE_COLORS
 from dashboard.components.version_indicator import render_version_indicator
@@ -961,3 +962,124 @@ def render():
     _frag_holdings(service)
     st.markdown("---")
     _render_record_form(service)
+    st.markdown("---")
+    _render_import_panel(service)
+
+
+def _render_import_panel(service: PortfolioHoldings):
+    """批量导入逐笔交易：粘贴 / 上传 CSV·Excel → 解析 → 可编辑预览 → 确认写入。
+
+    设计要点：
+      - 券商 App 交易截图无法在云端直接 OCR，因此截图走「对话发图 → 我识别成标准
+        CSV → 用户粘贴到文本框」的协作路径；本面板负责把结构化数据落到云端账本。
+      - 解析器（portfolio.trade_import）对中文表头、数值/代码/方向/日期做容错。
+      - 预览用 st.data_editor 可编辑，确认时逐条调用 service.record_trade，
+        单条失败不影响其余，并汇总成功/失败明细。
+    """
+    st.subheader("📥 批量导入逐笔交易")
+    render_src_badge("derived", base=["user"])
+    st.caption("支持粘贴文本 / 上传 CSV / Excel（券商 App 导出的交割单）。表头列名会自动识别。")
+
+    with st.expander("📥 从交割单导入（粘贴 / CSV / Excel）", expanded=False):
+        st.info(
+            "💡 如果你手里只有**券商 App 的交易截图**（不是导出文件）：直接把截图发到左侧对话窗口，"
+            "我会帮你识别成标准表格，你再把那张表复制粘贴到下面的文本框即可，不用手填。"
+        )
+        uploaded = st.file_uploader(
+            "上传 CSV / Excel 交割单", type=["csv", "xlsx", "xls"], key="import_file"
+        )
+        pasted = st.text_area(
+            "或在此粘贴文本（每行一笔，逗号 / 制表符 / 空格分隔；首行写表头更佳）",
+            height=170,
+            key="import_paste",
+            placeholder="日期,代码,名称,方向,数量,价格,费用\n2026-01-05,600519,贵州茅台,买入,100,1680.00,0",
+        )
+
+        if st.button("解析", type="primary", key="import_parse"):
+            file_bytes = uploaded.getvalue() if uploaded is not None else None
+            filename = getattr(uploaded, "name", None)
+            trades, errors = parse_trades(
+                raw_text=pasted if pasted.strip() else None,
+                file_bytes=file_bytes,
+                filename=filename,
+            )
+            for e in errors:
+                st.warning(e)
+            if trades:
+                st.session_state["import_preview"] = trades_to_records(trades)
+                st.success(f"解析出 {len(trades)} 笔，请在下表核对/修改后点「确认导入」")
+            else:
+                st.error("没有解析出任何交易记录（请检查内容或表头）")
+                st.session_state.pop("import_preview", None)
+
+        preview = st.session_state.get("import_preview")
+        if preview:
+            df = pd.DataFrame(preview)
+            edit_cols = [
+                "trade_date", "security_code", "security_name", "side",
+                "quantity", "price", "fee", "warn", "ok",
+            ]
+            df = df[ [c for c in edit_cols if c in df.columns] ]
+            edited = st.data_editor(
+                df,
+                num_rows="dynamic",
+                key="import_editor",
+                use_container_width=True,
+                column_config={
+                    "side": st.column_config.SelectboxColumn(
+                        "方向", options=["BUY", "SELL", "ADJUST"],
+                        help="BUY=买入 / SELL=卖出 / ADJUST=调账",
+                    ),
+                    "warn": st.column_config.TextColumn("提示(只读)", disabled=True),
+                    "ok": st.column_config.CheckboxColumn("可导入", disabled=True),
+                },
+            )
+            if st.button("✅ 确认导入", type="primary", key="import_confirm"):
+                _import_confirm(service, edited)
+
+
+def _import_confirm(service: PortfolioHoldings, edited: pd.DataFrame):
+    """逐条写入解析结果，汇总成功/失败。单条异常不中断其余。"""
+    ok_count = 0
+    fails: list[str] = []
+    for _, r in edited.iterrows():
+        code = str(r.get("security_code", "")).strip()
+        name = str(r.get("security_name", "")).strip() or code
+        side = str(r.get("side", "")).strip().upper()
+        try:
+            qty = float(r.get("quantity") or 0)
+            price = float(r.get("price") or 0)
+            fee = float(r.get("fee") or 0)
+        except (TypeError, ValueError):
+            fails.append(f"{code}: 数量/价格不是数字")
+            continue
+        if not code:
+            fails.append("存在空代码行")
+            continue
+        if side not in ("BUY", "SELL", "ADJUST"):
+            fails.append(f"{code}: 方向无效（需 BUY/SELL/ADJUST）")
+            continue
+        if qty <= 0 or price < 0:
+            fails.append(f"{code}: 数量必须>0、价格≥0")
+            continue
+        try:
+            service.record_trade(
+                security_code=code,
+                security_name=name,
+                side=side,
+                quantity=qty,
+                price=price,
+                trade_date=str(r.get("trade_date", "")).strip() or date.today().isoformat(),
+                fee=fee,
+                note="批量导入",
+            )
+            ok_count += 1
+        except Exception as exc:
+            fails.append(f"{code} {r.get('trade_date', '')}: {exc}")
+
+    if ok_count:
+        st.success(f"✅ 成功导入 {ok_count} 笔")
+    if fails:
+        st.error("以下记录导入失败：\n" + "\n".join(fails))
+    st.session_state.pop("import_preview", None)
+    st.rerun()
