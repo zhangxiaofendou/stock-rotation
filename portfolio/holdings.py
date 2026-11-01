@@ -12,6 +12,8 @@ import pandas as pd
 from data.storage import pg_store
 from data.storage.sqlite_store import SQLiteStore
 
+from portfolio import stock_lookup
+
 
 _UNSET = object()
 
@@ -60,11 +62,30 @@ class PortfolioHoldings:
         target_weight: float = None,
         stop_loss: float = None,
     ) -> None:
-        """记录一笔用户实际操作，并同步当前头寸。"""
+        """记录一笔用户实际操作，并同步当前头寸。
+
+        行业自动补全：调用方未传行业时（如批量导入），按代码反查行业名并
+        解析 881xxx 板块代码后写入持仓——批量导入的持仓不再缺行业。
+        手动传入的行业（用户手填/表单带出）优先，不被反查结果覆盖。
+        反查失败不影响交易写入（任何异常静默，行业留空由页面兜底）。
+        """
         if not security_code or not security_name:
             raise ValueError("证券代码和证券名称不能为空")
         if not self.user_id:
             raise ValueError("持仓操作必须指定 user_id（当前用户未登录？）")
+        sector_code = sector_code or None
+        sector_name = sector_name or None
+        if sector_name is None or sector_code is None:
+            try:
+                info = stock_lookup.lookup_stock_info(str(security_code).strip())
+                auto_name = str(info.get("sector_name") or "") if info else ""
+                if auto_name:
+                    if sector_name is None:
+                        sector_name = auto_name
+                    if sector_code is None:
+                        sector_code = stock_lookup.resolve_sector(auto_name)[0] or None
+            except Exception:  # noqa: BLE001 — 行业补全失败不阻塞交易
+                pass
         self.store.record_portfolio_transaction(
             trade_date=trade_date or date.today().isoformat(),
             security_code=str(security_code).strip(),
