@@ -1083,32 +1083,11 @@ def _render_import_panel(service: PortfolioHoldings):
                 "quantity", "price", "fee", "duplicate", "warn", "ok",
             ]
             df = df[ [c for c in edit_cols if c in df.columns] ]
-            try:
-                edited = st.data_editor(
-                    df,
-                    num_rows="dynamic",
-                    key=st.session_state.get("import_editor_key", "import_editor"),
-                    use_container_width=True,
-                    column_config={
-                        "side": st.column_config.SelectboxColumn(
-                            "方向", options=["BUY", "SELL", "ADJUST"],
-                            help="BUY=买入 / SELL=卖出 / ADJUST=调账",
-                        ),
-                        "duplicate": st.column_config.CheckboxColumn(
-                            "重复(只读)", disabled=True,
-                            help="与已登记记录重复，确认导入时自动跳过",
-                        ),
-                        "warn": st.column_config.TextColumn("提示(只读)", disabled=True),
-                        "ok": st.column_config.CheckboxColumn("可导入", disabled=True),
-                    },
-                )
-            except Exception as ed_err:
-                # 渲染失败兜底：至少让用户看到只读数据并直接按当前数据确认导入
-                st.error(f"编辑表格渲染失败（已降级为只读预览）：{ed_err}")
-                st.dataframe(df, use_container_width=True)
-                edited = df
+            # 只读预览：st.data_editor 的编辑组件在云端托管环境下前端渲染不可靠
+            # （服务端无异常但浏览器上表格静默消失），改用与持仓表同款的 st.dataframe。
+            st.dataframe(df, use_container_width=True, key=st.session_state.get("import_editor_key", "import_preview_df"))
             if st.button("✅ 确认导入", type="primary", key="import_confirm"):
-                _import_confirm(service, edited)
+                _import_confirm(service, df)
 
 
 def _apply_import(service: PortfolioHoldings, edited: pd.DataFrame) -> tuple[int, int, list[str]]:
