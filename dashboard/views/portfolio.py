@@ -443,31 +443,48 @@ def fill_sector_display(display: pd.DataFrame, service=None) -> pd.DataFrame:
         display.loc[fill_mask, "sector_name"] = display.loc[fill_mask, "quote_sector_name"]
         if service is not None:
             for idx in display.index[fill_mask]:
-                _persist_sector(service, str(display.at[idx, "security_code"]),
-                                str(display.at[idx, "sector_name"]))
+                _name = str(display.at[idx, "sector_name"] or "")
+                if _name:
+                    _persist_sector(service, str(display.at[idx, "security_code"]), _name)
         blank = display["sector_name"].map(_is_blank_name)
     for idx in display.index[blank]:
         name = _sector_name_fallback(str(display.at[idx, "security_code"])) or None
-        display.at[idx, "sector_name"] = name
-        if name and service is not None:
-            _persist_sector(service, str(display.at[idx, "security_code"]), str(name))
+        if name:
+            display.at[idx, "sector_name"] = name
+            if service is not None:
+                _persist_sector(service, str(display.at[idx, "security_code"]), str(name))
     return display
 
 
 def _persist_sector(service, code: str, name: str) -> None:
-    """把补出的行业名写回持仓账本；失败静默（不影响页面渲染）。"""
+    """把补出的行业名 + 离线解析出的行业代码（881xxx）写回持仓账本；失败静默。
+
+    行业代码用本地同花顺映射 resolve_sector(行业名) 推导，无需联网，
+    与 advisor 复盘所需的 sector_code 对齐，避免「有行业名却仍提示补全行业代码」。
+    """
+    updates = {"sector_name": name}
     try:
-        service.update_metadata(code, sector_name=name)
+        res = resolve_sector(name)
+        if res and res[0]:
+            updates["sector_code"] = res[0]
+    except Exception:
+        pass
+    try:
+        service.update_metadata(code, **updates)
     except Exception:
         pass
 
 
 def autofill_missing_sectors(user_id: str, max_lookup: int = 20) -> int:
-    """App 启动自检：扫描当前用户全部持仓，行业缺失的按代码反查并写回账本。
+    """App 启动自检：扫描当前用户全部持仓，行业名/行业代码缺失的按代码反查并写回账本。
 
-    与 fill_sector_display 的页面级兜底互补：本函数在登录后跑一次，
-    无论用户先访问哪个页面都先把行业固化进账本。返回本次补全的标的数。
-    lookup 自带进程级缓存与异常吞噬，永不抛出。
+    补全逻辑（离线优先，不依赖云端联网）：
+      1) 行业名缺失 → 先联网反查（东财/腾讯），再退行情快照 quote_sector_name；
+      2) 行业代码缺失 → 用本地同花顺映射 resolve_sector(行业名) 离线推导 881xxx；
+      3) 缺哪个补哪个，写回账本。返回本次补全的标的数。
+    与 fill_sector_display 的页面级兜底互补：本函数在登录后跑一次，无论用户先访问
+    哪个页面都先把行业名+代码固化进账本，确保 advisor 复盘不再误报「待补全」。
+    lookup 与 resolve 均自带缓存与异常吞噬，永不抛出、绝不阻断 App 启动。
     """
     try:
         service = PortfolioHoldings(user_id=str(user_id))
@@ -476,18 +493,52 @@ def autofill_missing_sectors(user_id: str, max_lookup: int = 20) -> int:
         return 0
     if positions is None or positions.empty or "sector_name" not in positions.columns:
         return 0
-    blank = positions[positions["sector_name"].map(_is_blank_name)]
-    if blank.empty:
-        return 0
     filled = 0
-    for _, r in blank.head(max_lookup).iterrows():
+    for _, r in positions.head(max_lookup).iterrows():
         code = str(r.get("security_code") or "").strip()
         if not code:
             continue
-        name = _sector_name_fallback(code)
-        if name:
-            _persist_sector(service, code, name)
-            filled += 1
+        name = r.get("sector_name")
+        code_field = r.get("sector_code")
+        name_blank = _is_blank_name(name)
+        code_blank = _is_blank_name(code_field)
+        if not name_blank and not code_blank:
+            continue  # 名称+代码都有，无需处理
+
+        # 1) 行业名缺失 → 联网反查（东财/腾讯，进程级缓存），再退行情快照
+        if name_blank:
+            name = _sector_name_fallback(code)
+            if _is_blank_name(name):
+                try:
+                    q = load_live_quotes_for_portfolio((code,))
+                    if not q.empty and not _is_blank_name(q.iloc[0].get("quote_sector_name")):
+                        name = str(q.iloc[0]["quote_sector_name"])
+                except Exception:
+                    pass
+
+        if _is_blank_name(name):
+            continue  # 实在拿不到行业名，本轮回填不了
+
+        # 2) 离线推导行业代码（行业名 -> 881xxx，本地同花顺映射，无需联网）
+        resolved_code = ""
+        try:
+            res = resolve_sector(name)
+            resolved_code = (res[0] or "") if res else ""
+        except Exception:
+            pass
+
+        # 3) 缺哪个补哪个，写回账本
+        updates = {}
+        if name_blank and name:
+            updates["sector_name"] = name
+        if code_blank and resolved_code:
+            updates["sector_code"] = resolved_code
+        if updates:
+            try:
+                service.update_metadata(code, **updates)
+                filled += 1
+            except Exception:
+                pass
     return filled
 
 

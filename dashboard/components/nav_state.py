@@ -51,20 +51,21 @@ def persistent_tabs(key: str, tabs: list):
     return choice
 
 
-def persistent_radio(key: str, options: list, label: str = "导航菜单"):
+def persistent_radio(key: str, options: list, label: str = "导航菜单", default=None):
     """受控单选（用于顶层页面导航），同样具备刷新保留能力。
 
     参数:
         key:      query 参数名
         options:  选项列表
         label:    侧边栏显示文案
+        default:  首选默认项（关闭网页重新打开时的首页）；不传则取 options[0]
 
     返回:
         当前选中的选项
     """
     qp = st.query_params.get(key, [None])[0]
     if qp not in options:
-        qp = options[0]
+        qp = default if default in options else options[0]
 
     if key not in st.session_state:
         st.session_state[key] = qp

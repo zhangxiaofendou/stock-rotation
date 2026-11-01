@@ -66,6 +66,22 @@ try:
     filled3 = P.autofill_missing_sectors("nobody")
     if filled3 != 0:
         fails.append(f"Case3 空用户应返回 0, 实得 {filled3}")
+
+    # --- Case 4 (核心修复): 已有行业名但缺行业代码 → 离线推导并补写 881xxx ---
+    # 这正是 advisor 一直误报「待补全」的根源：旧 autofill 只写 sector_name，漏了 sector_code。
+    store.record_portfolio_transaction(
+        trade_date="2026-02-01", security_code="300229", security_name="拓尔思",
+        side="BUY", quantity=100, price=20.0, user_id="u4",
+        sector_name="IT服务Ⅱ", sector_code="")  # 有名称无代码
+    filled4 = P.autofill_missing_sectors("u4")
+    if filled4 != 1:
+        fails.append(f"Case4 应补全 1 个(补齐行业代码), 实得 {filled4}")
+    pos4 = store.get_portfolio_positions(user_id="u4")
+    r4 = pos4[pos4["security_code"] == "300229"].iloc[0]
+    if str(r4["sector_name"]) != "IT服务Ⅱ":
+        fails.append(f"Case4 行业名应保持 IT服务Ⅱ, 实得 {r4['sector_name']!r}")
+    if str(r4["sector_code"]) != "881271":
+        fails.append(f"Case4 行业代码应离线补为 881271, 实得 {r4['sector_code']!r}")
 finally:
     P.lookup_stock_info = orig_lookup
     P.PortfolioHoldings = orig_service
@@ -75,4 +91,4 @@ if fails:
     for f in fails:
         print(" -", f)
     sys.exit(1)
-print("PASS: 启动行业自检 3 例全部通过")
+print("PASS: 启动行业自检 4 例全部通过（含「有行业名缺行业代码→离线补 881xxx」核心修复）")
