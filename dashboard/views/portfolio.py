@@ -1014,25 +1014,34 @@ def _render_import_panel(service: PortfolioHoldings):
         if st.button("解析", type="primary", key="import_parse"):
             file_bytes = uploaded.getvalue() if uploaded is not None else None
             filename = getattr(uploaded, "name", None)
-            trades, errors = parse_trades(
-                raw_text=pasted if pasted.strip() else None,
-                file_bytes=file_bytes,
-                filename=filename,
-            )
-            for e in errors:
-                st.warning(e)
-            if trades:
-                records = trades_to_records(trades)
-                dup = _annotate_import_duplicates(records, service)
-                st.session_state["import_preview"] = records
-                msg = f"解析出 {len(records)} 笔"
-                if dup:
-                    msg += f"，其中 {dup} 笔与已登记记录重复（将自动跳过，见下表「重复」列）"
-                msg += "，请在下表核对/修改后点「确认导入」"
-                st.success(msg)
-            else:
-                st.error("没有解析出任何交易记录（请检查内容或表头）")
+            try:
+                trades, errors = parse_trades(
+                    raw_text=pasted if pasted.strip() else None,
+                    file_bytes=file_bytes,
+                    filename=filename,
+                )
+                for e in errors:
+                    st.warning(e)
+                if trades:
+                    # 先写入预览，确保表格一定显示；标重复这一步即使失败也不阻塞预览
+                    records = trades_to_records(trades)
+                    st.session_state["import_preview"] = records
+                    try:
+                        dup = _annotate_import_duplicates(records, service)
+                    except Exception as ann_err:  # 标重复失败不应让表格消失
+                        dup = 0
+                        st.warning(f"重复标记跳过（不影响导入）：{ann_err}")
+                    msg = f"解析出 {len(records)} 笔"
+                    if dup:
+                        msg += f"，其中 {dup} 笔与已登记记录重复（将自动跳过，见下表「重复」列）"
+                    msg += "，请在下表核对/修改后点「确认导入」"
+                    st.success(msg)
+                else:
+                    st.error("没有解析出任何交易记录（请检查内容或表头）")
+                    st.session_state.pop("import_preview", None)
+            except Exception as exc:  # 任何异常都显式提示，避免“静默无反应”
                 st.session_state.pop("import_preview", None)
+                st.exception(exc)
 
         preview = st.session_state.get("import_preview")
         if preview:
