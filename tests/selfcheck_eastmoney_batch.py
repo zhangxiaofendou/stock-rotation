@@ -158,6 +158,54 @@ def _test_build_position_analysis_per_code_fallback():
     print("  [OK] Case 5: per-code lookup 兜底让 603887 正确显示行业与板块状态")
 
 
+def _test_positions_table_sector_fallback():
+    """Case 6：顶部持仓表也走行业兜底链（DB → quote_sector_name → per-code 补查）。
+
+    截图复现：603887 存量录入 sector_name=None，顶部「我的持仓」表显示 None，
+    而下方分析表有兜底显示 IT服务Ⅱ——两张表行业来源不一致。
+    fill_sector_display 必须把顶部表也补齐，且不影响 ETF（quote 不带行业、DB 有值）。
+    """
+    import portfolio.stock_lookup as stock_lookup
+    from dashboard.views import portfolio as portfolio_page
+
+    display = pd.DataFrame([
+        {   # 存量 stock：DB 无行业、实时行情带出 IT服务Ⅱ
+            "security_code": "603887", "security_name": "城地香江",
+            "sector_name": None, "asset_type": "stock",
+            "quote_sector_name": "IT服务Ⅱ", "market_price": 6.88,
+        },
+        {   # ETF：DB 已有「旅游」，quote_sector_name 为空 → 不应被改写
+            "security_code": "159766", "security_name": "旅游ETF富国",
+            "sector_name": "旅游", "asset_type": "etf",
+            "quote_sector_name": None, "market_price": 0.52,
+        },
+        {   # 存量 stock：DB 无行业、行情也没带 → 必须按 code 补查
+            "security_code": "600000", "security_name": "浦发银行",
+            "sector_name": None, "asset_type": "stock",
+            "quote_sector_name": None, "market_price": 10.0,
+        },
+    ])
+    stock_lookup.clear_cache()
+    calls = []
+
+    def _fake_lookup(code):
+        calls.append(code)
+        return {"name": "x", "price": 1.0, "sector_name": "银行", "asset_type": "stock"}
+
+    with mock.patch.object(portfolio_page, "lookup_stock_info", side_effect=_fake_lookup):
+        out = portfolio_page.fill_sector_display(display)
+
+    r = out.set_index("security_code")
+    assert str(r.loc["603887", "sector_name"]) == "IT服务Ⅱ", \
+        f"603887 应从 quote_sector_name 带出: {r.loc['603887', 'sector_name']!r}"
+    assert str(r.loc["159766", "sector_name"]) == "旅游", \
+        f"159766 DB 已有行业，不应被改写: {r.loc['159766', 'sector_name']!r}"
+    assert str(r.loc["600000", "sector_name"]) == "银行", \
+        f"600000 应按 code 补查带出: {r.loc['600000', 'sector_name']!r}"
+    assert calls == ["600000"], f"per-code 补查只应对仍为空的标的发起，实际: {calls}"
+    print("  [OK] Case 6: 顶部持仓表行业兜底链与下表同源，603887 不再显示 None")
+
+
 # imports 在函数内（避免循环）
 import pandas as pd  # noqa: E402
 
@@ -171,6 +219,7 @@ def main() -> int:
         _test_quote_empty_data_returns_empty,
         _test_fetch_quotes_batch_propagates_sector,
         _test_build_position_analysis_per_code_fallback,
+        _test_positions_table_sector_fallback,
     ):
         try:
             fn()
@@ -183,7 +232,7 @@ def main() -> int:
     if failures:
         print(f"\n结果：0 通过 / {len(failures)} 失败")
         return 1
-    print(f"\n结果：5 通过 / 0 失败")
+    print(f"\n结果：6 通过 / 0 失败")
     return 0
 
 

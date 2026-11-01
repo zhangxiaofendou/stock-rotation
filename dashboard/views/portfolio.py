@@ -399,6 +399,46 @@ def _render_record_form(service: PortfolioHoldings):
                 st.error(f"保存失败：{exc}")
 
 
+def _is_blank_name(v) -> bool:
+    """None/NaN/空串 都算「没有行业名」。"""
+    if v is None:
+        return True
+    s = str(v).strip()
+    return s == "" or s.lower() in ("none", "nan")
+
+
+def _sector_name_fallback(code: str) -> str:
+    """按代码单独补查行业名（session 级缓存，避免每次渲染重复打网）。"""
+    cache = st.session_state.setdefault("_sector_name_lookup_cache", {})
+    if code in cache:
+        return str(cache[code] or "")
+    try:
+        info = lookup_stock_info(code)
+        name = str(info.get("sector_name") or "") if info else ""
+    except Exception:
+        name = ""
+    cache[code] = name
+    return name
+
+
+def fill_sector_display(display: pd.DataFrame) -> pd.DataFrame:
+    """顶部持仓表的行业兜底，与下方分析表 `_build_position_analysis` 同源三级链：
+
+    DB sector_name → 实时行情 quote_sector_name → 按 code 单独补查。
+    存量录入未带出行业的标的（如 603887）不再在持仓表显示 None。
+    直接修改传入的 display（调用方持有副本，不影响 DB 账本）。
+    """
+    if display.empty or "sector_name" not in display.columns:
+        return display
+    blank = display["sector_name"].map(_is_blank_name)
+    if blank.any() and "quote_sector_name" in display.columns:
+        display.loc[blank, "sector_name"] = display.loc[blank, "quote_sector_name"]
+        blank = display["sector_name"].map(_is_blank_name)
+    for idx in display.index[blank]:
+        display.at[idx, "sector_name"] = _sector_name_fallback(str(display.at[idx, "security_code"])) or None
+    return display
+
+
 def _render_positions(service: PortfolioHoldings):
     summary = service.summary()
     positions = service.positions()
@@ -411,6 +451,7 @@ def _render_positions(service: PortfolioHoldings):
 
     quotes = load_live_quotes_for_portfolio(tuple(positions["security_code"].astype(str).tolist()))
     display = positions.merge(quotes, on="security_code", how="left") if not quotes.empty else positions.copy()
+    fill_sector_display(display)
     if "market_price" not in display:
         display["market_price"] = np.nan
     display["market_value"] = display["quantity"] * display["market_price"]
