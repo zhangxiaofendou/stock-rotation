@@ -1045,6 +1045,8 @@ def _render_import_panel(service: PortfolioHoldings):
                     # 先写入预览，确保表格一定显示；标重复这一步即使失败也不阻塞预览
                     records = trades_to_records(trades)
                     st.session_state["import_preview"] = records
+                    # 每次解析换新的 editor key：避免 session 残留旧编辑状态与新数据形状冲突
+                    st.session_state["import_editor_key"] = f"import_editor_{time.time_ns()}"
                     try:
                         dup = _annotate_import_duplicates(records, service)
                     except Exception as ann_err:  # 标重复失败不应让表格消失
@@ -1065,29 +1067,46 @@ def _render_import_panel(service: PortfolioHoldings):
         preview = st.session_state.get("import_preview")
         if preview:
             df = pd.DataFrame(preview)
+            # 防御清洗：异常文件（超大/损坏）可能解析出超长文本或混合类型，
+            # 会把 data_editor 前端渲染压垮（表格静默消失），这里统一规整。
+            for c in ("trade_date", "security_code", "security_name", "side", "warn"):
+                if c in df.columns:
+                    df[c] = df[c].map(lambda v: str(v).strip()[:80] if v is not None and str(v).strip().lower() != "nan" else "")
+            for c in ("quantity", "price", "fee"):
+                if c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+            for c in ("duplicate", "ok"):
+                if c in df.columns:
+                    df[c] = df[c].map(bool)
             edit_cols = [
                 "trade_date", "security_code", "security_name", "side",
                 "quantity", "price", "fee", "duplicate", "warn", "ok",
             ]
             df = df[ [c for c in edit_cols if c in df.columns] ]
-            edited = st.data_editor(
-                df,
-                num_rows="dynamic",
-                key="import_editor",
-                use_container_width=True,
-                column_config={
-                    "side": st.column_config.SelectboxColumn(
-                        "方向", options=["BUY", "SELL", "ADJUST"],
-                        help="BUY=买入 / SELL=卖出 / ADJUST=调账",
-                    ),
-                    "duplicate": st.column_config.CheckboxColumn(
-                        "重复(只读)", disabled=True,
-                        help="与已登记记录重复，确认导入时自动跳过",
-                    ),
-                    "warn": st.column_config.TextColumn("提示(只读)", disabled=True),
-                    "ok": st.column_config.CheckboxColumn("可导入", disabled=True),
-                },
-            )
+            try:
+                edited = st.data_editor(
+                    df,
+                    num_rows="dynamic",
+                    key=st.session_state.get("import_editor_key", "import_editor"),
+                    use_container_width=True,
+                    column_config={
+                        "side": st.column_config.SelectboxColumn(
+                            "方向", options=["BUY", "SELL", "ADJUST"],
+                            help="BUY=买入 / SELL=卖出 / ADJUST=调账",
+                        ),
+                        "duplicate": st.column_config.CheckboxColumn(
+                            "重复(只读)", disabled=True,
+                            help="与已登记记录重复，确认导入时自动跳过",
+                        ),
+                        "warn": st.column_config.TextColumn("提示(只读)", disabled=True),
+                        "ok": st.column_config.CheckboxColumn("可导入", disabled=True),
+                    },
+                )
+            except Exception as ed_err:
+                # 渲染失败兜底：至少让用户看到只读数据并直接按当前数据确认导入
+                st.error(f"编辑表格渲染失败（已降级为只读预览）：{ed_err}")
+                st.dataframe(df, use_container_width=True)
+                edited = df
             if st.button("✅ 确认导入", type="primary", key="import_confirm"):
                 _import_confirm(service, edited)
 
