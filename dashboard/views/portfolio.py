@@ -1115,11 +1115,33 @@ def _render_import_panel(service: PortfolioHoldings):
                 "quantity", "price", "fee", "duplicate", "warn", "ok",
             ]
             df = df[ [c for c in edit_cols if c in df.columns] ]
-            # 只读预览：st.data_editor 的编辑组件在云端托管环境下前端渲染不可靠
-            # （服务端无异常但浏览器上表格静默消失），改用与持仓表同款的 st.dataframe。
-            st.dataframe(df, use_container_width=True, key=st.session_state.get("import_editor_key", "import_preview_df"))
+            # 只读预览 + 行勾选：st.data_editor 的编辑组件在云端托管环境下前端渲染
+            # 不可靠（服务端无异常但浏览器上表格静默消失），改用 st.dataframe 的
+            # 多行选择（与持仓表同款渲染引擎，已验证可显示）；勾选行=只导入勾选的，
+            # 不勾=导入全部。重复行即使被勾选，确认时仍会被去重自动跳过。
+            _sel_key = st.session_state.get("import_editor_key", "import_preview_df") + "_sel"
+            _selected: list = []
+            try:
+                _event = st.dataframe(
+                    df,
+                    use_container_width=True,
+                    key=_sel_key,
+                    selection_mode="multi-row",
+                    on_select="rerun",
+                    hide_index=False,
+                )
+                _selected = list(_event.selection.rows or [])
+            except Exception as sel_err:
+                # 旧版 streamlit 不支持行选择 → 降级为纯只读（导入全部）
+                st.dataframe(df, use_container_width=True, key=_sel_key)
+                st.caption(f"（当前环境不支持行勾选，将导入全部 {len(df)} 笔）")
+            if _selected:
+                st.caption(f"☑️ 已勾选 {len(_selected)} 笔，点「确认导入」将只导入勾选的行（不勾选 = 导入全部）")
+            else:
+                st.caption("💡 可点击表格左侧序号勾选要导入的行；不勾选 = 导入全部。「重复」列打勾的行确认时仍会自动跳过。")
+            to_import = df.iloc[_selected] if _selected else df
             if st.button("✅ 确认导入", type="primary", key="import_confirm"):
-                _import_confirm(service, df)
+                _import_confirm(service, to_import)
 
 
 def _apply_import(service: PortfolioHoldings, edited: pd.DataFrame) -> tuple[int, int, list[str]]:
