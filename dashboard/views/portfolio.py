@@ -422,22 +422,41 @@ def _sector_name_fallback(code: str) -> str:
     return name
 
 
-def fill_sector_display(display: pd.DataFrame) -> pd.DataFrame:
+def fill_sector_display(display: pd.DataFrame, service=None) -> pd.DataFrame:
     """顶部持仓表的行业兜底，与下方分析表 `_build_position_analysis` 同源三级链：
 
     DB sector_name → 实时行情 quote_sector_name → 按 code 单独补查。
     存量录入未带出行业的标的（如 603887）不再在持仓表显示 None。
-    直接修改传入的 display（调用方持有副本，不影响 DB 账本）。
+
+    若传入 `service`，兜底补出的行业会**立即写回账本**（仅真实补出的行写一次），
+    这样实时行情偶发失败时也不丢失行业显示。
+    直接修改传入的 display（调用方持有副本，不影响传入的原始账本快照）。
     """
     if display.empty or "sector_name" not in display.columns:
         return display
     blank = display["sector_name"].map(_is_blank_name)
     if blank.any() and "quote_sector_name" in display.columns:
-        display.loc[blank, "sector_name"] = display.loc[blank, "quote_sector_name"]
+        fill_mask = blank & display["quote_sector_name"].map(lambda v: not _is_blank_name(v))
+        display.loc[fill_mask, "sector_name"] = display.loc[fill_mask, "quote_sector_name"]
+        if service is not None:
+            for idx in display.index[fill_mask]:
+                _persist_sector(service, str(display.at[idx, "security_code"]),
+                                str(display.at[idx, "sector_name"]))
         blank = display["sector_name"].map(_is_blank_name)
     for idx in display.index[blank]:
-        display.at[idx, "sector_name"] = _sector_name_fallback(str(display.at[idx, "security_code"])) or None
+        name = _sector_name_fallback(str(display.at[idx, "security_code"])) or None
+        display.at[idx, "sector_name"] = name
+        if name and service is not None:
+            _persist_sector(service, str(display.at[idx, "security_code"]), str(name))
     return display
+
+
+def _persist_sector(service, code: str, name: str) -> None:
+    """把补出的行业名写回持仓账本；失败静默（不影响页面渲染）。"""
+    try:
+        service.update_metadata(code, sector_name=name)
+    except Exception:
+        pass
 
 
 def _render_positions(service: PortfolioHoldings):
@@ -452,7 +471,7 @@ def _render_positions(service: PortfolioHoldings):
 
     quotes = load_live_quotes_for_portfolio(tuple(positions["security_code"].astype(str).tolist()))
     display = positions.merge(quotes, on="security_code", how="left") if not quotes.empty else positions.copy()
-    fill_sector_display(display)
+    fill_sector_display(display, service)
     if "market_price" not in display:
         display["market_price"] = np.nan
     display["market_value"] = display["quantity"] * display["market_price"]
