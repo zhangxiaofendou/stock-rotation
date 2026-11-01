@@ -1001,10 +1001,6 @@ def _render_import_panel(service: PortfolioHoldings):
     st.caption("支持粘贴文本 / 上传 CSV / Excel（券商 App 导出的交割单）。表头列名会自动识别。")
 
     with st.expander("📥 从交割单导入（粘贴 / CSV / Excel）", expanded=False):
-        st.info(
-            "💡 如果你手里只有**券商 App 的交易截图**（不是导出文件）：直接把截图发到左侧对话窗口，"
-            "我会帮你识别成标准表格，你再把那张表复制粘贴到下面的文本框即可，不用手填。"
-        )
         uploaded = st.file_uploader(
             "上传 CSV / Excel 交割单", type=["csv", "xlsx", "xls"], key="import_file"
         )
