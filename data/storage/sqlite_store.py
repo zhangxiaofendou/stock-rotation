@@ -180,6 +180,20 @@ CREATE TABLE IF NOT EXISTS portfolio_transactions (
     created_at TEXT DEFAULT (datetime('now', 'localtime'))
 );
 
+CREATE TABLE IF NOT EXISTS sector_fill_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL DEFAULT '',
+    security_code TEXT NOT NULL,
+    security_name TEXT,
+    before_name TEXT,
+    before_code TEXT,
+    after_name TEXT,
+    after_code TEXT,
+    action TEXT,
+    source TEXT,
+    ts TEXT DEFAULT (datetime('now', 'localtime'))
+);
+
 -- 索引
 CREATE INDEX IF NOT EXISTS idx_sector_stocks_sector ON sector_stocks(sector_code);
 CREATE INDEX IF NOT EXISTS idx_sector_stocks_stock ON sector_stocks(stock_code);
@@ -864,6 +878,36 @@ class SQLiteStore:
             sql += " ORDER BY trade_date DESC, id DESC LIMIT ?"
             params.append(int(limit))
             return pd.read_sql_query(sql, conn, params=params)
+        finally:
+            conn.close()
+
+    def log_sector_fill(self, user_id: str, security_code: str, security_name: str,
+                       before_name, before_code, after_name, after_code,
+                       action: str, source: str) -> None:
+        """记录一条行业补全检查留痕（每次检查/补全都落库，供页面「检查报告」展示）。"""
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """INSERT INTO sector_fill_log
+                   (user_id, security_code, security_name, before_name, before_code,
+                    after_name, after_code, action, source)
+                   VALUES (?,?,?,?,?,?,?,?,?)""",
+                (str(user_id), str(security_code), str(security_name or ""),
+                 before_name, before_code, after_name, after_code, action, source),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def get_sector_fill_logs(self, user_id: str = "", limit: int = 500) -> pd.DataFrame:
+        """读取某用户的行业补全检查留痕（最新在前）。"""
+        conn = self._get_conn()
+        try:
+            return pd.read_sql_query(
+                "SELECT * FROM sector_fill_log WHERE user_id = ? "
+                "ORDER BY id DESC LIMIT ?",
+                conn, params=[str(user_id), int(limit)],
+            )
         finally:
             conn.close()
 

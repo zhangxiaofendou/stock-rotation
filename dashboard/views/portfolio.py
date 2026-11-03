@@ -21,6 +21,7 @@ from model.state_history import (
 from portfolio.holdings import PortfolioHoldings
 from portfolio.advisor import PortfolioAdvisor
 from portfolio.stock_lookup import lookup_stock_info, normalize_code, resolve_sector
+from portfolio.sector_fill import check_and_fill_position, summarize_traces
 from portfolio.fees import estimate_trade_fee
 from portfolio.trade_import import parse_trades, trades_to_records, trade_dedup_key
 from dashboard.components.data_source_badge import render_src_badge
@@ -476,69 +477,35 @@ def _persist_sector(service, code: str, name: str) -> None:
 
 
 def autofill_missing_sectors(user_id: str, max_lookup: int = 20) -> int:
-    """App 启动自检：扫描当前用户全部持仓，行业名/行业代码缺失的按代码反查并写回账本。
+    """App 启动自检：扫描当前用户全部持仓，行业名/行业代码缺失的离线优先补全并写回账本。
 
-    补全逻辑（离线优先，不依赖云端联网）：
-      1) 行业名缺失 → 先联网反查（东财/腾讯），再退行情快照 quote_sector_name；
-      2) 行业代码缺失 → 用本地同花顺映射 resolve_sector(行业名) 离线推导 881xxx；
-      3) 缺哪个补哪个，写回账本。返回本次补全的标的数。
-    与 fill_sector_display 的页面级兜底互补：本函数在登录后跑一次，无论用户先访问
-    哪个页面都先把行业名+代码固化进账本，确保 advisor 复盘不再误报「待补全」。
-    lookup 与 resolve 均自带缓存与异常吞噬，永不抛出、绝不阻断 App 启动。
+    统一复用 ``check_and_fill_position``（与录入/导入同一套逻辑），保证三入口行为
+    一致且均有可见留痕。离线优先、绝不联网（online_fallback=False）——云端沙箱常断
+    网，离线包已覆盖全 A 股，绝大多数可在此命中；联网兜底留给交互式录入/导入。
+    每次检查/补全落库 sector_fill_log，页面「行业补全检查留痕」据此可见。
+    永不抛出、绝不阻断 App 启动。
     """
     try:
         service = PortfolioHoldings(user_id=str(user_id))
         positions = service.positions()
     except Exception:  # noqa: BLE001 — 自检失败绝不阻断 App 启动
         return 0
-    if positions is None or positions.empty or "sector_name" not in positions.columns:
+    if positions is None or positions.empty or "security_code" not in positions.columns:
         return 0
     filled = 0
     for _, r in positions.head(max_lookup).iterrows():
         code = str(r.get("security_code") or "").strip()
         if not code:
             continue
-        name = r.get("sector_name")
-        code_field = r.get("sector_code")
-        name_blank = _is_blank_name(name)
-        code_blank = _is_blank_name(code_field)
-        if not name_blank and not code_blank:
-            continue  # 名称+代码都有，无需处理
-
-        # 1) 行业名缺失 → 联网反查（东财/腾讯，进程级缓存），再退行情快照
-        if name_blank:
-            name = _sector_name_fallback(code)
-            if _is_blank_name(name):
-                try:
-                    q = load_live_quotes_for_portfolio((code,))
-                    if not q.empty and not _is_blank_name(q.iloc[0].get("quote_sector_name")):
-                        name = str(q.iloc[0]["quote_sector_name"])
-                except Exception:
-                    pass
-
-        if _is_blank_name(name):
-            continue  # 实在拿不到行业名，本轮回填不了
-
-        # 2) 离线推导行业代码（行业名 -> 881xxx，本地同花顺映射，无需联网）
-        resolved_code = ""
         try:
-            res = resolve_sector(name)
-            resolved_code = (res[0] or "") if res else ""
-        except Exception:
-            pass
-
-        # 3) 缺哪个补哪个，写回账本
-        updates = {}
-        if name_blank and name:
-            updates["sector_name"] = name
-        if code_blank and resolved_code:
-            updates["sector_code"] = resolved_code
-        if updates:
-            try:
-                service.update_metadata(code, **updates)
+            trace = check_and_fill_position(
+                service, code, security_name=r.get("security_name"),
+                source_tag="登录自检", online_fallback=False,
+            )
+            if trace.get("filled"):
                 filled += 1
-            except Exception:
-                pass
+        except Exception:  # noqa: BLE001
+            pass
     return filled
 
 
@@ -1046,6 +1013,61 @@ def _frag_holdings(service: PortfolioHoldings):
     _render_pending_items(service)
     st.markdown("---")
     _render_transactions(service)
+    st.markdown("---")
+    # 手动触发一次全持仓行业检查（登录自检已自动跑，这里让用户随时可复核并看到留痕）
+    if st.button("🔍 重新检查全部持仓的行业补全", key="recheck_sectors"):
+        _filled = autofill_missing_sectors(getattr(service, "user_id", "") or "")
+        if _filled:
+            st.toast(f"已补全 {_filled} 个持仓的行业信息")
+        else:
+            st.toast("全部持仓行业已齐全，无需补全")
+        st.rerun()
+    _render_sector_fill_report(service)
+
+
+def _render_sector_fill_report(service: PortfolioHoldings):
+    """展示行业补全检查留痕（用户明确要求的「检查留痕」可见化）。
+
+    读取 sector_fill_log：每次登录 / 导入 / 添加记录都会落库一条，这里汇总计数并
+    列出明细，让用户清楚看到「哪些标的检查过、补了什么、哪些补不到」。
+    """
+    st.subheader("📋 行业补全检查留痕")
+    render_src_badge("derived", base=["user"])
+    user_id = getattr(service, "user_id", "") or ""
+    try:
+        logs = service.store.get_sector_fill_logs(user_id=user_id, limit=500)
+    except Exception:  # noqa: BLE001
+        logs = pd.DataFrame()
+    if logs is None or logs.empty:
+        st.info("暂无行业补全检查记录。任何一次登录 / 导入 / 添加记录都会在这里留下检查留痕。")
+        return
+
+    # 汇总计数
+    traces = logs.to_dict("records")
+    summ = summarize_traces(traces)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("检查次数", summ["total"])
+    c2.metric("补全成功", summ["filled"])
+    c3.metric("原本齐全", summ["already"])
+    c4.metric("未能补全", summ["failed"])
+
+    # 明细表（补全前 → 补全后）
+    view = logs.copy()
+    view["时间"] = view["ts"].map(lambda v: str(v)[:19] if v is not None else "")
+    view["代码"] = view["security_code"]
+    view["名称"] = view["security_name"].map(lambda v: str(v or ""))
+    view["补全前"] = view.apply(
+        lambda r: f"{r.get('before_name') or '—'}/{r.get('before_code') or '—'}", axis=1)
+    view["补全后"] = view.apply(
+        lambda r: f"{r.get('after_name') or '—'}/{r.get('after_code') or '—'}", axis=1)
+    view["动作"] = view["action"]
+    view["来源"] = view["source"]
+    view = view[["时间", "代码", "名称", "补全前", "补全后", "动作", "来源"]]
+    st.dataframe(view, hide_index=True, width="stretch",
+                 column_config={"补全前": st.column_config.TextColumn(width="medium"),
+                                "补全后": st.column_config.TextColumn(width="medium")})
+    st.caption("「补全前/补全后」格式为 行业名/行业代码。未能补全的标的通常是离线包未覆盖的小众代码，"
+               "可在「修改标的元数据」手动补一个 881xxx 板块代码。")
 
 
 def render():
@@ -1242,6 +1264,7 @@ def _apply_import(service: PortfolioHoldings, edited: pd.DataFrame) -> tuple[int
                 trade_date=str(r.get("trade_date", "")).strip() or date.today().isoformat(),
                 fee=fee,
                 note="批量导入",
+                source_tag="导入",
             )
             ok_count += 1
             existing.add(key)

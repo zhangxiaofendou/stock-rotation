@@ -13,6 +13,8 @@ from data.storage import pg_store
 from data.storage.sqlite_store import SQLiteStore
 
 from portfolio import stock_lookup
+from portfolio import industry_resolver
+from portfolio.sector_fill import check_and_fill_position
 
 
 _UNSET = object()
@@ -61,6 +63,7 @@ class PortfolioHoldings:
         sector_name: str = None,
         target_weight: float = None,
         stop_loss: float = None,
+        source_tag: str = "添加记录",
     ) -> None:
         """记录一笔用户实际操作，并同步当前头寸。
 
@@ -75,17 +78,9 @@ class PortfolioHoldings:
             raise ValueError("持仓操作必须指定 user_id（当前用户未登录？）")
         sector_code = sector_code or None
         sector_name = sector_name or None
-        if sector_name is None or sector_code is None:
-            try:
-                info = stock_lookup.lookup_stock_info(str(security_code).strip())
-                auto_name = str(info.get("sector_name") or "") if info else ""
-                if auto_name:
-                    if sector_name is None:
-                        sector_name = auto_name
-                    if sector_code is None:
-                        sector_code = stock_lookup.resolve_sector(auto_name)[0] or None
-            except Exception:  # noqa: BLE001 — 行业补全失败不阻塞交易
-                pass
+        # 注：行业补全不再在写入前「在线反查」——云端常断网，在线反查失败会导致
+        # 行业名/代码永远补不到（正是 advisor 一直弹「待补全」的根因）。改为写入后
+        # 由 check_and_fill_position 统一做「离线优先」补全+留痕（详见下方调用）。
         self.store.record_portfolio_transaction(
             trade_date=trade_date or date.today().isoformat(),
             security_code=str(security_code).strip(),
@@ -102,6 +97,17 @@ class PortfolioHoldings:
             stop_loss=stop_loss,
             user_id=self.user_id,
         )
+        # 录入后统一检查+补全+留痕：离线优先解析 name+code，缺哪个补哪个，写回账本
+        # 并落库一条 sector_fill_log（页面「行业补全检查留痕」据此可见）。
+        # 交互式录入允许在线兜底（online_fallback=True）；缺失标的（如纯 SELL 后已无
+        # 持仓）update_metadata 会抛「未找到持仓」，这里静默吞掉、绝不阻塞录入。
+        try:
+            check_and_fill_position(
+                self, str(security_code).strip(), security_name=str(security_name).strip(),
+                source_tag=source_tag, online_fallback=True,
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     def update_metadata(self, security_code: str, **fields) -> None:
         """只修改持仓属性，不新增交易、不改变数量和平均成本。"""
