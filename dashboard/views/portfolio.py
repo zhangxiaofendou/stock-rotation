@@ -1110,6 +1110,46 @@ def _annotate_import_duplicates(records: list[dict], service: PortfolioHoldings)
     return dup
 
 
+def _auto_parse_import(service: PortfolioHoldings) -> None:
+    """上传文件 / 粘贴文本变更时自动解析，结果写入 session_state['import_preview']。
+
+    用于替代独立的「解析」按钮——用户只要选了文件或粘贴了内容，就立刻解析出预览，
+    下方只保留一个「确认导入」按钮即可完成导入。
+    """
+    uploaded = st.session_state.get("import_file")
+    pasted = (st.session_state.get("import_paste") or "").strip()
+    file_bytes = uploaded.getvalue() if uploaded is not None else None
+    filename = getattr(uploaded, "name", None)
+    if not file_bytes and not pasted:
+        # 文件被清空且无文本 → 顺手清掉旧预览，避免残留上一次的结果
+        st.session_state.pop("import_preview", None)
+        return
+    try:
+        trades, errors = parse_trades(
+            raw_text=pasted or None,
+            file_bytes=file_bytes,
+            filename=filename,
+        )
+        for e in errors:
+            st.warning(e)
+        if trades:
+            # 先写入预览，确保表格一定显示；标重复这一步即使失败也不阻塞预览
+            records = trades_to_records(trades)
+            st.session_state["import_preview"] = records
+            # 每次解析换新的 editor key：避免 session 残留旧编辑状态与新数据形状冲突
+            st.session_state["import_editor_key"] = f"import_editor_{time.time_ns()}"
+            try:
+                _annotate_import_duplicates(records, service)
+            except Exception as ann_err:  # 标重复失败不应让表格消失
+                st.warning(f"重复标记跳过（不影响导入）：{ann_err}")
+        else:
+            st.error("没有解析出任何交易记录（请检查内容或表头）")
+            st.session_state.pop("import_preview", None)
+    except Exception as exc:  # 任何异常都显式提示，避免“静默无反应”
+        st.session_state.pop("import_preview", None)
+        st.exception(exc)
+
+
 def _render_import_panel(service: PortfolioHoldings):
     """批量导入逐笔交易：粘贴 / 上传 CSV·Excel → 解析 → 可编辑预览 → 确认写入。
 
@@ -1125,51 +1165,28 @@ def _render_import_panel(service: PortfolioHoldings):
     st.caption("支持粘贴文本 / 上传 CSV / Excel（券商 App 导出的交割单）。表头列名会自动识别。")
 
     with st.expander("📥 从交割单导入（粘贴 / CSV / Excel）", expanded=False):
-        uploaded = st.file_uploader(
-            "上传 CSV / Excel 交割单", type=["csv", "xlsx", "xls"], key="import_file"
+        st.file_uploader(
+            "上传 CSV / Excel 交割单", type=["csv", "xlsx", "xls"],
+            key="import_file", on_change=lambda: _auto_parse_import(service),
         )
-        pasted = st.text_area(
+        st.text_area(
             "或在此粘贴文本（每行一笔，逗号 / 制表符 / 空格分隔；首行写表头更佳）",
             height=170,
             key="import_paste",
+            on_change=lambda: _auto_parse_import(service),
             placeholder="日期,代码,名称,方向,数量,价格,费用\n2026-01-05,600519,贵州茅台,买入,100,1680.00,0",
         )
-
-        if st.button("解析", type="primary", key="import_parse"):
-            file_bytes = uploaded.getvalue() if uploaded is not None else None
-            filename = getattr(uploaded, "name", None)
-            try:
-                trades, errors = parse_trades(
-                    raw_text=pasted if pasted.strip() else None,
-                    file_bytes=file_bytes,
-                    filename=filename,
-                )
-                for e in errors:
-                    st.warning(e)
-                if trades:
-                    # 先写入预览，确保表格一定显示；标重复这一步即使失败也不阻塞预览
-                    records = trades_to_records(trades)
-                    st.session_state["import_preview"] = records
-                    # 每次解析换新的 editor key：避免 session 残留旧编辑状态与新数据形状冲突
-                    st.session_state["import_editor_key"] = f"import_editor_{time.time_ns()}"
-                    try:
-                        dup = _annotate_import_duplicates(records, service)
-                    except Exception as ann_err:  # 标重复失败不应让表格消失
-                        dup = 0
-                        st.warning(f"重复标记跳过（不影响导入）：{ann_err}")
-                    msg = f"解析出 {len(records)} 笔"
-                    if dup:
-                        msg += f"，其中 {dup} 笔与已登记记录重复（将自动跳过，见下表「重复」列）"
-                    msg += "，请在下表核对/修改后点「确认导入」"
-                    st.success(msg)
-                else:
-                    st.error("没有解析出任何交易记录（请检查内容或表头）")
-                    st.session_state.pop("import_preview", None)
-            except Exception as exc:  # 任何异常都显式提示，避免“静默无反应”
-                st.session_state.pop("import_preview", None)
-                st.exception(exc)
+        st.caption("上传文件或粘贴文本后会**自动解析**，核对下方表格后点「确认导入」即可。")
 
         preview = st.session_state.get("import_preview")
+        if preview:
+            _n = len(preview)
+            _dup = sum(1 for r in preview if r.get("duplicate"))
+            st.success(
+                f"✅ 已自动解析 {_n} 笔"
+                + (f"，其中 {_dup} 笔与已登记记录重复（确认导入时会自动跳过）" if _dup else "")
+                + "，请在下表核对，然后点「确认导入」。"
+            )
         if preview:
             df = pd.DataFrame(preview)
             # 防御清洗：异常文件（超大/损坏）可能解析出超长文本或混合类型，
