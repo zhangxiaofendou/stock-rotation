@@ -1115,7 +1115,12 @@ def _auto_parse_import(service: PortfolioHoldings) -> None:
 
     用于替代独立的「解析」按钮——用户只要选了文件或粘贴了内容，就立刻解析出预览，
     下方只保留一个「确认导入」按钮即可完成导入。
+
+    注意：本函数在 on_change 回调里被调用，回调内**不要直接调用 st.warning 等展示
+    命令**（部分云端 Streamlit 版本在回调里渲染元素会异常导致整段不显示）。所有提示
+    统一写入 session_state['import_parse_msgs']，由渲染阶段统一展示。
     """
+    msgs: list[str] = []
     uploaded = st.session_state.get("import_file")
     pasted = (st.session_state.get("import_paste") or "").strip()
     file_bytes = uploaded.getvalue() if uploaded is not None else None
@@ -1123,6 +1128,7 @@ def _auto_parse_import(service: PortfolioHoldings) -> None:
     if not file_bytes and not pasted:
         # 文件被清空且无文本 → 顺手清掉旧预览，避免残留上一次的结果
         st.session_state.pop("import_preview", None)
+        st.session_state.pop("import_parse_msgs", None)
         return
     try:
         trades, errors = parse_trades(
@@ -1130,8 +1136,7 @@ def _auto_parse_import(service: PortfolioHoldings) -> None:
             file_bytes=file_bytes,
             filename=filename,
         )
-        for e in errors:
-            st.warning(e)
+        msgs.extend(errors)
         if trades:
             # 先写入预览，确保表格一定显示；标重复这一步即使失败也不阻塞预览
             records = trades_to_records(trades)
@@ -1141,13 +1146,91 @@ def _auto_parse_import(service: PortfolioHoldings) -> None:
             try:
                 _annotate_import_duplicates(records, service)
             except Exception as ann_err:  # 标重复失败不应让表格消失
-                st.warning(f"重复标记跳过（不影响导入）：{ann_err}")
+                msgs.append(f"重复标记跳过（不影响导入）：{ann_err}")
         else:
-            st.error("没有解析出任何交易记录（请检查内容或表头）")
+            msgs.append("没有解析出任何交易记录（请检查内容或表头）")
             st.session_state.pop("import_preview", None)
-    except Exception as exc:  # 任何异常都显式提示，避免“静默无反应”
+    except Exception as exc:  # 任何异常都记录下来，渲染阶段显式提示，避免“静默无反应”
+        msgs.append(f"解析出错：{exc}")
         st.session_state.pop("import_preview", None)
-        st.exception(exc)
+    st.session_state["import_parse_msgs"] = msgs
+
+
+def _render_import_preview_safe(service: PortfolioHoldings) -> None:
+    """渲染导入预览：兜底解析 + 显眼状态 + 多级降级渲染，保证表格一定出现。
+
+    修复「上传后表格一直不出现」：
+      1) 若文件/文本已存在但预览缺失（on_change 未触发或被吞），渲染时再解析一次；
+      2) 解析有结果 → 成功提示 + 表格；解析失败/空 → 显眼的失败提示与排查清单；
+      3) 表格渲染逐级降级（dataframe → table → write），绝不让云端渲染差异把表格吞掉。
+    """
+    uploaded = st.session_state.get("import_file")
+    pasted = (st.session_state.get("import_paste") or "").strip()
+    has_input = (uploaded is not None) or bool(pasted)
+
+    # 兜底：有输入但还没解析出来 → 渲染时再解析一次（解决 on_change 不触发导致不显示）
+    if has_input and not st.session_state.get("import_preview"):
+        try:
+            _auto_parse_import(service)
+        except Exception:  # 兜底解析自身失败不应让面板崩溃
+            pass
+
+    # 先把解析过程中的提示显眼地展示出来
+    for m in (st.session_state.get("import_parse_msgs") or []):
+        st.warning(m)
+
+    preview = st.session_state.get("import_preview")
+    if not preview:
+        if has_input:
+            st.error(
+                "⚠️ 未能从上传的文件 / 粘贴文本中解析出任何交易记录。请排查：\n"
+                "① 文件是否为券商导出的 CSV / Excel 交割单；\n"
+                "② 首行是否含表头：日期,代码,名称,方向,数量,价格,费用；\n"
+                "③ 若 CSV 仍解析不出，请改用下方「粘贴文本」方式，或把文件发我帮你转成标准格式。"
+            )
+        else:
+            st.caption("👆 上传文件或粘贴文本后，会自动解析并在这里显示预览表格；核对无误后点「确认导入」即可。")
+        return
+
+    _n = len(preview)
+    _dup = sum(1 for r in preview if r.get("duplicate"))
+    st.success(
+        f"✅ 已自动解析 {_n} 笔"
+        + (f"，其中 {_dup} 笔与已登记记录重复（确认导入时会自动跳过）" if _dup else "")
+        + "，请核对下方表格，然后点「确认导入」。"
+    )
+
+    df = pd.DataFrame(preview)
+    # 防御清洗：异常文件可能解析出超长/混合类型文本，会把前端表格压垮，统一规整
+    for c in ("trade_date", "security_code", "security_name", "side", "warn"):
+        if c in df.columns:
+            df[c] = df[c].map(
+                lambda v: str(v).strip()[:80]
+                if v is not None and str(v).strip().lower() != "nan" else ""
+            )
+    for c in ("quantity", "price", "fee"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    for c in ("duplicate", "ok"):
+        if c in df.columns:
+            df[c] = df[c].map(bool)
+    view_cols = [c for c in ["trade_date", "security_code", "security_name", "side",
+                             "quantity", "price", "fee", "duplicate", "warn"]
+                 if c in df.columns]
+    df = df[view_cols]
+
+    # 多级降级渲染：保证表格一定出现，不被云端渲染差异吞掉
+    try:
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    except Exception:
+        try:
+            st.table(df)
+        except Exception:
+            st.write(df)
+    st.caption("💡 表格里是要导入的内容；「重复」列打勾的行，确认导入时会自动跳过（去重）。")
+
+    if st.button("✅ 确认导入", type="primary", key="import_confirm"):
+        _import_confirm(service, df)
 
 
 def _render_import_panel(service: PortfolioHoldings):
@@ -1177,61 +1260,7 @@ def _render_import_panel(service: PortfolioHoldings):
             placeholder="日期,代码,名称,方向,数量,价格,费用\n2026-01-05,600519,贵州茅台,买入,100,1680.00,0",
         )
         st.caption("上传文件或粘贴文本后会**自动解析**，核对下方表格后点「确认导入」即可。")
-
-        preview = st.session_state.get("import_preview")
-        if preview:
-            _n = len(preview)
-            _dup = sum(1 for r in preview if r.get("duplicate"))
-            st.success(
-                f"✅ 已自动解析 {_n} 笔"
-                + (f"，其中 {_dup} 笔与已登记记录重复（确认导入时会自动跳过）" if _dup else "")
-                + "，请在下表核对，然后点「确认导入」。"
-            )
-        if preview:
-            df = pd.DataFrame(preview)
-            # 防御清洗：异常文件（超大/损坏）可能解析出超长文本或混合类型，
-            # 会把 data_editor 前端渲染压垮（表格静默消失），这里统一规整。
-            for c in ("trade_date", "security_code", "security_name", "side", "warn"):
-                if c in df.columns:
-                    df[c] = df[c].map(lambda v: str(v).strip()[:80] if v is not None and str(v).strip().lower() != "nan" else "")
-            for c in ("quantity", "price", "fee"):
-                if c in df.columns:
-                    df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-            for c in ("duplicate", "ok"):
-                if c in df.columns:
-                    df[c] = df[c].map(bool)
-            edit_cols = [
-                "trade_date", "security_code", "security_name", "side",
-                "quantity", "price", "fee", "duplicate", "warn", "ok",
-            ]
-            df = df[ [c for c in edit_cols if c in df.columns] ]
-            # 只读预览 + 行勾选：st.data_editor 的编辑组件在云端托管环境下前端渲染
-            # 不可靠（服务端无异常但浏览器上表格静默消失），改用 st.dataframe 的
-            # 多行选择（与持仓表同款渲染引擎，已验证可显示）；勾选行=只导入勾选的，
-            # 不勾=导入全部。重复行即使被勾选，确认时仍会被去重自动跳过。
-            _sel_key = st.session_state.get("import_editor_key", "import_preview_df") + "_sel"
-            _selected: list = []
-            try:
-                _event = st.dataframe(
-                    df,
-                    use_container_width=True,
-                    key=_sel_key,
-                    selection_mode="multi-row",
-                    on_select="rerun",
-                    hide_index=False,
-                )
-                _selected = list(_event.selection.rows or [])
-            except Exception as sel_err:
-                # 旧版 streamlit 不支持行选择 → 降级为纯只读（导入全部）
-                st.dataframe(df, use_container_width=True, key=_sel_key)
-                st.caption(f"（当前环境不支持行勾选，将导入全部 {len(df)} 笔）")
-            if _selected:
-                st.caption(f"☑️ 已勾选 {len(_selected)} 笔，点「确认导入」将只导入勾选的行（不勾选 = 导入全部）")
-            else:
-                st.caption("💡 可点击表格左侧序号勾选要导入的行；不勾选 = 导入全部。「重复」列打勾的行确认时仍会自动跳过。")
-            to_import = df.iloc[_selected] if _selected else df
-            if st.button("✅ 确认导入", type="primary", key="import_confirm"):
-                _import_confirm(service, to_import)
+        _render_import_preview_safe(service)
 
 
 def _apply_import(service: PortfolioHoldings, edited: pd.DataFrame) -> tuple[int, int, list[str]]:
