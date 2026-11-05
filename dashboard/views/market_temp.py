@@ -107,7 +107,9 @@ def load_market_data():
     state_dist = sm.get_state_distribution()
 
     # 计算当日涨跌分布（基于 parquet index_hist 最新日涨跌幅，而非均线趋势）
+    # breadth_lists 同时留存每个分类下的板块明细，供柱状图鼠标悬浮展示。
     up_count = down_count = flat_count = 0
+    breadth_lists: dict[str, list] = {"上涨": [], "横盘": [], "下跌": []}
     if state_df is not None and not state_df.empty:
         parquet_store, _ = get_stores()
         latest_date = state_df["date"].iloc[0]
@@ -130,6 +132,10 @@ def load_market_data():
             try:
                 pct = float(row_today["pct_change"].iloc[-1])
                 pct_rows.append(pct)
+                # 板块名优先用状态机快照里的名称，缺失时回退到代码映射
+                _name = str(row.get("sector_name") or get_sector_name(code) or code)
+                _category = "上涨" if pct > 0.01 else ("下跌" if pct < -0.01 else "横盘")
+                breadth_lists[_category].append((_name, pct, str(code)))
             except Exception:
                 continue
         if pct_rows:
@@ -137,6 +143,10 @@ def load_market_data():
             up_count = int((arr > 0.01).sum())      # > +0.01%
             down_count = int((arr < -0.01).sum())   # < -0.01%
             flat_count = int(((arr >= -0.01) & (arr <= 0.01)).sum())
+    # 上涨按涨幅降序、下跌按跌幅升序（跌得最多的排前面），横盘原序
+    breadth_lists["上涨"].sort(key=lambda x: x[1], reverse=True)
+    breadth_lists["下跌"].sort(key=lambda x: x[1])
+    breadth_lists["横盘"].sort(key=lambda x: x[1], reverse=True)
 
     # 板块分组统计
     group_stats = {}
@@ -153,7 +163,27 @@ def load_market_data():
                     "sell_count": len(sell_states),
                 }
 
-    return market_status, state_df, state_dist, up_count, down_count, flat_count, group_stats
+    return market_status, state_df, state_dist, up_count, down_count, flat_count, group_stats, breadth_lists
+
+
+def build_breadth_hover_text(items, per_line: int = 6) -> str:
+    """把「(板块名, 当日涨跌幅, 代码)」列表拼成 Plotly 悬浮用的 HTML 文本。
+
+    每行 per_line 个板块，避免 tooltip 过宽；板块名做 HTML 转义，防止特殊字符
+    破坏 tooltip。抽成纯函数便于脱离 Streamlit 运行时单测。
+    """
+    if not items:
+        return "—"
+    parts = []
+    for name, pct, _code in items:
+        safe = str(name).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        try:
+            parts.append(f"{safe} {float(pct):+.2f}%")
+        except (TypeError, ValueError):
+            parts.append(safe)
+    return "<br>".join(
+        "、".join(parts[i:i + per_line]) for i in range(0, len(parts), per_line)
+    )
 
 
 def render():
@@ -268,7 +298,15 @@ def _render_market_overview():
     import plotly.graph_objects as go  # 懒加载:plotly ~10MB,仅在使用此函数时加载
     import plotly.express as px        # 懒加载:饼图 px.pie 用,必须在本函数作用域内导入
     with st.spinner("加载市场数据..."):
-        market_status, state_df, state_dist, up_count, down_count, flat_count, group_stats = load_market_data()
+        _loaded = load_market_data()
+    # 兼容旧版 7 元组返回值（历史单测/缓存仍可能给 7 项）
+    if len(_loaded) >= 8:
+        (market_status, state_df, state_dist, up_count, down_count,
+         flat_count, group_stats, breadth_lists) = _loaded[:8]
+    else:
+        (market_status, state_df, state_dist, up_count, down_count,
+         flat_count, group_stats) = _loaded[:7]
+        breadth_lists = {"上涨": [], "横盘": [], "下跌": []}
 
     if state_df is None or state_df.empty:
         st.warning("暂无板块状态数据，请先运行数据更新流程")
@@ -330,6 +368,11 @@ def _render_market_overview():
             st.metric("下跌板块", down_count, delta=f"-{down_count/total:.1%}")
 
         # 涨跌比柱状图（中国股市惯例：涨红跌绿）
+        # 鼠标悬浮柱子时列出该趋势方向下的全部板块（名称 + 当日涨跌幅）
+        hover_texts = [
+            build_breadth_hover_text(breadth_lists.get(k))
+            for k in ("上涨", "横盘", "下跌")
+        ]
         fig_bar = go.Figure()
         fig_bar.add_trace(go.Bar(
             x=["上涨", "横盘", "下跌"],
@@ -337,14 +380,21 @@ def _render_market_overview():
             marker_color=["#F44336", "#9E9E9E", "#4CAF50"],
             text=[up_count, flat_count, down_count],
             textposition="auto",
+            customdata=[[t] for t in hover_texts],
+            hovertemplate=(
+                "<b>%{x}板块：%{y} 个</b><br>"
+                "%{customdata[0]}<extra></extra>"
+            ),
         ))
         fig_bar.update_layout(
             height=250,
             margin={"l": 10, "r": 10, "t": 10, "b": 10},
             xaxis_title="趋势方向",
             yaxis_title="板块数量",
+            hoverlabel={"align": "left"},
         )
         st.plotly_chart(fig_bar, width="stretch")
+        st.caption("💡 鼠标悬浮到柱子上，可查看该方向下的具体板块与当日涨跌幅。")
 
     # ================================================================
     # 九宫格状态分布
